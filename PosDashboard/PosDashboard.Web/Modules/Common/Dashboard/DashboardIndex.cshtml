@@ -1,0 +1,506 @@
+@model PosDashboard.Common.DashboardPageModel
+@inject ITextLocalizer Localizer
+@{
+    ViewData["Title"] = "Dashboard";
+    ViewData["PageId"] = "Dashboard";
+}
+
+@section Head {
+@Html.StyleBundle("Pages/Dashboard")
+}
+
+@section ContentHeader {
+    <h1>@Localizer.Get("Navigation.Dashboard")</h1>
+}
+
+<div class="row">
+    <div class="col-lg-3 col-sm-6">
+        <div class="card s-dashboard-card-sm">
+            <div class="card-body">
+                <h3>@Model.OpenOrders</h3>
+                <p>Open Orders</p>
+            </div>
+            <div class="icon">
+                <i class="fa fa-shopping-cart"></i>
+            </div>
+            <!--#if (Northwind)-->
+            <a href="~/Northwind/Order?shippingState=0" class="card-footer">More info <i class="fa fa-arrow-circle-right"></i></a>
+            <!--#else-->
+            <!--<a href="" class="card-footer">More info <i class="fa fa-arrow-circle-right"></i></a>-->
+            <!--#endif-->
+        </div>
+    </div>
+    <div class="col-lg-3 col-sm-6">
+        <div class="card s-dashboard-card-sm s-alt">
+            <div class="card-body">
+                <h3>@Model.ClosedOrderPercent<sup style="font-size: 20px">%</sup></h3>
+                <p>Closed Orders</p>
+            </div>
+            <div class="icon">
+                <i class="fa fa-truck"></i>
+            </div>
+            <!--#if (Northwind)-->
+            <a href="~/Northwind/Order?shippingState=1" class="card-footer">More info <i class="fa fa-arrow-circle-right"></i></a>
+            <!--#else-->
+            <!--<a href="" class="card-footer">More info <i class="fa fa-arrow-circle-right"></i></a>-->
+            <!--#endif-->
+        </div>
+    </div>
+    <div class="col-lg-3 col-sm-6">
+        <div class="card s-dashboard-card-sm">
+            <div class="card-body">
+                <h3>@Model.CustomerCount</h3>
+                <p>Total Customers</p>
+            </div>
+            <div class="icon">
+                <i class="fa fa-user-plus"></i>
+            </div>
+            <!--#if (Northwind)-->
+            <a href="~/Northwind/Customer" class="card-footer">More info <i class="fa fa-arrow-circle-right"></i></a>
+            <!--#else-->
+            <!--<a href="" class="card-footer">More info <i class="fa fa-arrow-circle-right"></i></a>-->
+            <!--#endif-->
+        </div>
+    </div>
+    <div class="col-lg-3 col-sm-6">
+        <div class="card s-dashboard-card-sm s-alt">
+            <div class="card-body">
+                <h3>@Model.ProductCount</h3>
+                <p>Product Types</p>
+            </div>
+            <div class="icon">
+                <i class="fa fa-tag"></i>
+            </div>
+            <!--#if (Northwind)-->
+            <a href="~/Northwind/Product" class="card-footer">More info <i class="fa fa-arrow-circle-right"></i></a>
+            <!--#else-->
+            <!--<a href="" class="card-footer">More info <i class="fa fa-arrow-circle-right"></i></a>-->
+            <!--#endif-->
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <section class="col-lg-7">
+        <div class="card s-dashboard-card">
+            <div class="card-body">
+                <ul class="nav nav-tabs" role="tablist">
+                    <li class="header"><h3 class="card-title">Orders</h3></li>
+                    <li class="nav-item ms-auto"><a class="nav-link active" href="#orders-by-quarter-pane" data-bs-toggle="tab">By Quarter</a></li>
+                    <li class="nav-item"><a class="nav-link" href="#orders-by-type-pane" data-bs-toggle="tab">By Type</a></li>
+                </ul>
+                <div class="tab-content no-padding">
+                    <div class="tab-pane fade show active" id="orders-by-quarter-pane">
+                        <canvas id="orders-by-quarter-chart" style="height: 280px;"></canvas>
+                    </div>
+                    <div class="tab-pane fade" id="orders-by-type-pane">
+                        <canvas id="orders-by-type-chart" style="height: 280px; width: 300px; margin: 0 auto;"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card s-dashboard-card s-chat">
+            <div class="row g-0" data-status="online">
+                <div class="col-12 col-lg-5 col-xl-4 s-chat-sidebar">
+                    <div class="d-flex align-items-center justify-content-center p-3 s-chat-profile-section">
+                        <a class="btn">
+                            <img src="data:image/webp;base64,UklGRuIDAABXRUJQVlA4WAoAAAAIAAAAOwAAOwAAVlA4IOQCAABQDwCdASo8ADwAPq1Sn0sjIiERBVQzCsTxgGQ+oiw9hENTwd9pzCmNOjgqz1BLR5pRtM5X9YOF7kGpZtljj+6ckXFyW2KsgCc8JYL9KurrK3EdBBMrGowoK9UZD/iTA+KbXYnE1cbGvu3c+JR1unsTXPYnwH9HfTmvCZToLAPWx0ZgAAD+9cR7DIxrZnbJjXE9lU58QYGFwJDpLWxoJ9rsw2loZFnhgjbjtYOK3RXspHa3War4aN+9zdH0d/yLDZ1++f3K7CMaYccYamwlYy3zOPreZxAaab+65YP2bdRK3aI2Ko/BYZHGHwSWPwMfoUnSLwB7Vt4QW/Drh6A6riCahnxfEl3vXACxlbbrKrc1A0vx2csOmv9K3bp2kJ/824w3f7S90Capou4AQB55p9QsJvQuSgk9IUJ/EySModtebrq1s+6GnSHo2tD6hXhVUUDhcvPdqIcjDapEej3Ifd7nN0XWDgRS+Cw1ze0STx2SohhMOpase21zKkfN08WMhQOFY9ZVwNrebUumtW0Va9UsqrZ6rGm6zCTkvllrSAQazUYH3OufacPWpBf5zo7I7Bf6hydXU2uCT5ZHlggyb88Smj5JLnIK/Qw/Qplnzkc8tEPmAVryyVAHJuGnLfjOKV6q/aBhmsxewLvKnAV35/cd2fhEsrct+flzIi99uoZ8MYMbGbKsvggeUckP79DhSk6uVyJbbNCTiGJrIwK1OCPtx5k/kI/RCX5iWmQNi5PvtKfh2GMxJn8kW+7SyRfgV+wHqnpAjqRyrYRWOqlbUFStsEzS6qie6dw5vz78c9Oyp3lDvjL1oAaBxHQafb4gdEOyhMV+Aot/W7MNXTA2jv0dK596U+n53w3BvhCP7HnUoZJ8dmyQOG44aHxyFsAGOzspba9AjjtTVadQlA55iLdUwXGxFkkt4kqIS97R8ZFo2zr/o51JN5J5MTffdtVBQmWBgYdBhaMmwiI/Jw3THMJyETAAAEVYSUbYAAAASUkqAAgAAAAGABIBAwABAAAAAQAAABoBBQABAAAAVgAAABsBBQABAAAAXgAAACgBAwABAAAAAgAAADEBAgARAAAAZgAAAGmHBAABAAAAeAAAAAAAAABgAAAAAQAAAGAAAAABAAAAcGFpbnQubmV0IDQuMy4xMgAABQAAkAcABAAAADAyMzABoAMAAQAAAAEAAAACoAQAAQAAADwAAAADoAQAAQAAADwAAAAFoAQAAQAAALoAAAAAAAAAAgABAAIABAAAAFI5OAACAAcABAAAADAxMDAAAAAA" class="s-chat-profile-image rounded-circle me-1" s-alt="Mike Harris" width="60" height="60">
+                            <span class="ms-1">
+                                Mike Harris
+                            </span>
+                            <i class="fa fa-chevron-down expand-button text-muted"></i>
+                        </a>
+                        <div id="status-options" class="dropdown-menu">
+                            <ul>
+                                <li id="status-online" class=""><span class="status-circle"></span> <p>Online</p></li>
+                                <li id="status-away" class="active"><span class="status-circle"></span> <p>Away</p></li>
+                                <li id="status-busy" class=""><span class="status-circle"></span> <p>Busy</p></li>
+                                <li id="status-offline" class=""><span class="status-circle"></span> <p>Offline</p></li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div class="d-flex align-items-center px-2">
+                        <div class="flex-grow-1">
+                            <input type="text" class="form-control mb-3" placeholder="Search contacts...">
+                        </div>
+                    </div>
+
+                    <div class="list-group">
+                        <a href="#" class="list-group-item list-group-item-action border-0 active">
+                            <div class="badge bg-success float-end">2</div>
+                            <div class="d-flex align-items-start">
+                                <img src="data:image/webp;base64,UklGRuIDAABXRUJQVlA4WAoAAAAIAAAAOwAAOwAAVlA4IOQCAABQDwCdASo8ADwAPq1Sn0sjIiERBVQzCsTxgGQ+oiw9hENTwd9pzCmNOjgqz1BLR5pRtM5X9YOF7kGpZtljj+6ckXFyW2KsgCc8JYL9KurrK3EdBBMrGowoK9UZD/iTA+KbXYnE1cbGvu3c+JR1unsTXPYnwH9HfTmvCZToLAPWx0ZgAAD+9cR7DIxrZnbJjXE9lU58QYGFwJDpLWxoJ9rsw2loZFnhgjbjtYOK3RXspHa3War4aN+9zdH0d/yLDZ1++f3K7CMaYccYamwlYy3zOPreZxAaab+65YP2bdRK3aI2Ko/BYZHGHwSWPwMfoUnSLwB7Vt4QW/Drh6A6riCahnxfEl3vXACxlbbrKrc1A0vx2csOmv9K3bp2kJ/824w3f7S90Capou4AQB55p9QsJvQuSgk9IUJ/EySModtebrq1s+6GnSHo2tD6hXhVUUDhcvPdqIcjDapEej3Ifd7nN0XWDgRS+Cw1ze0STx2SohhMOpase21zKkfN08WMhQOFY9ZVwNrebUumtW0Va9UsqrZ6rGm6zCTkvllrSAQazUYH3OufacPWpBf5zo7I7Bf6hydXU2uCT5ZHlggyb88Smj5JLnIK/Qw/Qplnzkc8tEPmAVryyVAHJuGnLfjOKV6q/aBhmsxewLvKnAV35/cd2fhEsrct+flzIi99uoZ8MYMbGbKsvggeUckP79DhSk6uVyJbbNCTiGJrIwK1OCPtx5k/kI/RCX5iWmQNi5PvtKfh2GMxJn8kW+7SyRfgV+wHqnpAjqRyrYRWOqlbUFStsEzS6qie6dw5vz78c9Oyp3lDvjL1oAaBxHQafb4gdEOyhMV+Aot/W7MNXTA2jv0dK596U+n53w3BvhCP7HnUoZJ8dmyQOG44aHxyFsAGOzspba9AjjtTVadQlA55iLdUwXGxFkkt4kqIS97R8ZFo2zr/o51JN5J5MTffdtVBQmWBgYdBhaMmwiI/Jw3THMJyETAAAEVYSUbYAAAASUkqAAgAAAAGABIBAwABAAAAAQAAABoBBQABAAAAVgAAABsBBQABAAAAXgAAACgBAwABAAAAAgAAADEBAgARAAAAZgAAAGmHBAABAAAAeAAAAAAAAABgAAAAAQAAAGAAAAABAAAAcGFpbnQubmV0IDQuMy4xMgAABQAAkAcABAAAADAyMzABoAMAAQAAAAEAAAACoAQAAQAAADwAAAADoAQAAQAAADwAAAAFoAQAAQAAALoAAAAAAAAAAgABAAIABAAAAFI5OAACAAcABAAAADAxMDAAAAAA" class="rounded-circle me-1" s-alt="Vanessa Simons" width="40" height="40">
+                                <div class="flex-grow-1 ms-3">
+                                    Vanessa Simons
+                                    <div class="small"><span class="fas fa-circle chat-online"></span> Online</div>
+                                </div>
+                            </div>
+                        </a>
+                        <a href="#" class="list-group-item list-group-item-action border-0">
+                            <div class="d-flex align-items-start">
+                                <img src="data:image/webp;base64,UklGRloEAABXRUJQVlA4WAoAAAAIAAAAOwAAOwAAVlA4IFwDAABQEQCdASo8ADwAPq1InkgjIiEVCzUYMwrE4ArDNj0TDlZAeB6xx0Ki3nB7Sq8tDi8FMu/uUxhmuMPtXkrWG1m0UuUUCXyksCMEDdhzlIOdfxOBG5dGyVURkS1xmFJoRZg2w4Z2aHAuCEs3gOiT6V7g2nZdAEDj5/I7zw0zEZu/KSrokqw4wifZ+Qi1QHn/5unH2wAA/uDUnp8sm4Mj9y27eA2F7XZxNRZ30fyZH4J86Ml9Wv5Mw+nfGfKr+IlQDEyHxbfnKK7VJciXmrnNLV7dZgvZYE4MeQu6dMGimO0Off6ntF+pmXcBrrBG395qQ8ZEa+VhewK1Wq6kxg0gQk/EF5dskTJHHMHh7Wy2A70FW3QN8muzF7IwrUPpZFDJM/xKflPBzLv2Da3C5fg/3ufbTbW+VD7uYhjGIEVk9O7vOlnk7hKcmLrUldSvL4C/+0eKWCIqqjP1JmBwS40gcgIck7kHnr+PQX3TNfuqUI5/sOVf1c82aDyOnbFKu2IbuS9S2ze9HtoOjOBtoE9UGJWmuqtjwrgv1Qc+GBSOcXQmtsU421vmowhAoxj9Mkrdn8rgpd4BqKMjWQ7nb/Y2tLZOT1E8avAhbojEZCXdieYH5VSUCYdummxXttO5ddWTT3i0+D/MVVBea872TFaavYwcD1cX905dJj3OpU3TbCX6NxqDR+HHJ1qwBx6mYXFieB9g628CtrnWEWrn/ooM08kpE1eV3jtqJR71t2nbfg0J5Ph+ZWBuLfEvnKNFgjtC9DY57XtKknTRaJrDtddK+OkztCHAcfU+EG2D1+rLmzimzlqD5XmkpdAoXXjXExtuUxPYC2CJrDhZ2+QNY9kZkLJwWprzFvS4x2BIp0cdpRe6yStdbYv2pT6DlZ2KEaVsHL0XeFWJikRYhGiWPjTj3s2LbEzuqQAS+Usqx2T3sOLlvMERYBDqZ1ldsJBcc4A9rpvYS12GNZkX0mgLSDpBCtRFsGgf+/SFqt1+q96PnAt2h6QsLI1Wppnp4DKJweM0LZh9ANVyaJXJ1ecIi1c9lmg9T/tETaNG+PvQIYv4vtokdnL8wpcQ3QPC+x/6oglINLDymZnfd20MvOrE7VK8uB64Wm22P8Kp6+FizRoQ/LHljiJA+29LDQb/rRoAAEVYSUbYAAAASUkqAAgAAAAGABIBAwABAAAAAQAAABoBBQABAAAAVgAAABsBBQABAAAAXgAAACgBAwABAAAAAgAAADEBAgARAAAAZgAAAGmHBAABAAAAeAAAAAAAAABIAAAAAQAAAEgAAAABAAAAcGFpbnQubmV0IDQuMy4xMgAABQAAkAcABAAAADAyMzABoAMAAQAAAAEAAAACoAQAAQAAADwAAAADoAQAAQAAADwAAAAFoAQAAQAAALoAAAAAAAAAAgABAAIABAAAAFI5OAACAAcABAAAADAxMDAAAAAA" class="rounded-circle me-1" s-alt="Chris Lessman" width="40" height="40">
+                                <div class="flex-grow-1 ms-3">
+                                    Chris Lessman
+                                    <div class="small"><span class="fas fa-circle chat-online"></span> Online</div>
+                                </div>
+                            </div>
+                        </a>
+                        <a href="#" class="list-group-item list-group-item-action border-0">
+                            <div class="d-flex align-items-start">
+                                <img src="data:image/webp;base64,UklGRtQDAABXRUJQVlA4WAoAAAAIAAAAOwAAOwAAVlA4INYCAACQDgCdASo8ADwAPq1Em0UjIaEXDJVUMwrE4Axb/7yuvMfegXxu8R+gnFVhRjhhMpXLAWhL9mwf/7e8TQU47IA1DyI0b3MBTRDVI2Y7RUqDoVWs+68NaabhC4woW3cPw+N/yfI4YfciEgEUWw5RdTfqHm6OFLRV4gM3QOEGUAD+/73Oi5Z5hHx++gmxe7RDdv8zqEn9IveyarN+XyvPHd9qam0nAvA7IYNwQ4iqPPNMAMCtYWdeJE5SEqez7hEKM327qFATooF/UxGFqH/ZMr8mCmbZE2w3jHOrdMX5tvYFY+Uqakui3Gsp4fdXjjHO1sNj8b3b2FpwgbGJ86747r9doM/JpFUxNvHImd9OB+Tp7Gkj55p/Uce5fgkMyzXjaB7Y/8KQ+Fyv49rsv775PnCvwAXdW3vSuyPdi2BvuJD/Xus97vf/DJwX51cwIt0guJECKIQesfnXnZYja2tWb/PQlO8dkQP9YbQ+MoJV6HWU9b3dMLHO05GVTJnKF9cQMl5gx5AcnmIPjsp6VBI6JI7q7c598pyFi2t0aYt2fsIRX6cBXpxqwGrNB7gctW3Etujqvmen7k8cVqa8d/EYisc6vNFUrcDmakNW8Fd/+biIvpPZ1CgQeS/rt3L3MRBPJdPm79irKJTBBoMaYwmn2tJz9DZgkqL41716aTAiflR+gwlOqRHFk1KNM3BasOTWijSfzWx1+V/SvilEZeQF9ajvRruG/kiXmD2ftxZJHlRcmjIKMVVIZmTE1Op/uBr6WK/HpLvNUh8SwXZeYZYJ8MDnHRu+Cvl1RgpDb0g8NCM9b3SAuUQwj78T+ejfZd9IlVDO7GB6i7KUcpW9A8olmMY5AGMGnLIvg6tUveN0ZNYEAjVfU/UMt+60UEK6EsS55YEnkll/aKzPHRdkfLj4xjDYyFrWHdqP2rjtCj3JqtWz9C/kInOVeSU1qI6q/OxbKCXrtAAAAABFWElG2AAAAElJKgAIAAAABgASAQMAAQAAAAEAAAAaAQUAAQAAAFYAAAAbAQUAAQAAAF4AAAAoAQMAAQAAAAIAAAAxAQIAEQAAAGYAAABphwQAAQAAAHgAAAAAAAAAYAAAAAEAAABgAAAAAQAAAHBhaW50Lm5ldCA0LjMuMTIAAAUAAJAHAAQAAAAwMjMwAaADAAEAAAABAAAAAqAEAAEAAAA8AAAAA6AEAAEAAAA8AAAABaAEAAEAAAC6AAAAAAAAAAIAAQACAAQAAABSOTgAAgAHAAQAAAAwMTAwAAAAAA==" class="rounded-circle me-1" s-alt="Daniel Mason" width="40" height="40">
+                                <div class="flex-grow-1 ms-3">
+                                    Daniel Mason
+                                    <div class="small"><span class="fas fa-circle chat-offline"></span> Offline</div>
+                                </div>
+                            </div>
+                        </a>
+                        <a href="#" class="list-group-item list-group-item-action border-0">
+                            <div class="d-flex align-items-start">
+                                <img src="data:image/webp;base64,UklGRsAFAABXRUJQVlA4WAoAAAAYAAAAOwAAOwAAQUxQSNgBAAABkGzbtmk7e733Ytu2bdu2rZKdkm3bdkq2bdu2dfaKM+fKD0TEBDi0hIuWJFXymBHChzrrYckbj9149c2n93d3b5/fNX90MRSx3NwnXv/268E2CcSI5Fv5Tv/529keScVCuDb3FBpcHZyEF270R0UHp0oKKXTENyU+KiecBp+VejchJcoxJQ+jVP3AehyZILOV7SsQ4l6g6ZbwuMofeR+K4sarweGwsE0WNsPCb7NwPSZKVlp4nhHlZlj40hI21YKuCUVNNHEmGmqkiZsJUe1MvM6LKvLWgh8XAxT9qAX1s8NjZJS3oOfjYlzNzybOxgFlfWliTxTUExOzQjFJDgcWgqYOm++1WnyRHRTjjIkD0UCy2ILv59CVXhm4kgoWMs3TPrUTmEtyjXVqQCRH7BSQColjRphHyua42T78T2HTPcOzXOIblNyskP6eUYnl0t4laAda2GzGEJor/IKwRGihkzzuQNQQlot3APf19ZgQlst+E6Y6U2iu7HPcpgg8qfcS9iwnz0m1Wyjfx4CTPGdBejS2AefSnwR9aSsWYu8H6aEYBmIu9ah7KXiRpnpF+0GhLOn8RfFPMrDKvFZmZ+Ekv6LUm8UoETd4jj5uHIaT7l+U/Wl+kl8AVlA4IOICAABQDwCdASo8ADwAPqE8lUQjIaEXDJeMMwoE4NsAVIS7XxPy9vrzzLwANt3yJ+zZIZWU74amXPj+EAkvSu/hfJ6MVvyZrUIvjGb569+83o/F6n16BidW0bq1KS9U3ZY0T7/ktZyeWglgDb7n8twJmuB3ONDmxuQ4fbkLz2Y9eB1iB5J6gAD+9PwqlEiN80jNJ1Zi0lAxlrrnxeEKd0ocvLo+PUktOalPDF/IT/MJxJxD3Ac17SoYdJ3v76aKVrLjgi6rrEAYvfIelMIqYQ51K+u/dTo9Z/LDVRveELM0M0f6pdN548rAhRUuZAvAmHBQ1+d+XSeeS9Qjo7hKWG1ShVGyFemaSn+/MC0umdPXc+2i+yhim/joUEzda5KpfOuzsubqJrm8su7jAeQkBxSOqP6+uA79D62c4EGAJipOxSRvy8+lj7s/d3AKbSI6mJM4SkC3C1cFYEdMv6mv5q1pYvDr/clbZvcQI4X4k1jsA3ifp/pS5PAJ9tq9BN303bL5KUiBRueobIwqHmFV5wKDcTmnOtABQjJlfymQrzfsa/D8MjX7cBTfH34Sd4bFhZjAY6/kSKj+6nClWBwCVJI6KNuru287iKm92tvab4dcXy3K+ErGHfTEXZfQO4MgQebrJ5RB4VPf4C/QnGAls5N1aAdEqPsdaZPqrz22ZhRN3Nwr36TlXX4y/HZZKO8mzWd+wItZ+8uTqcypcBXTNUcQsj9Kwk3DijLEtDuc2TIvx7Y22iTfn11589soYY68L4nC1htHxH7ZgEeyNIOFtG2P//Rut5v/9MItp43vy7fx4GW0hllDZexOKV8jTlY7x6n/AjMc1Khz1H2aAS/DnnIqED2NBbFea1JPsD4FEUUUrxQJhZHDaKoBPLo5NmyJFX3XSRtyQ/NfjXG7+1Cp5v/FROUmM7c52DXDMihiX2xnc5Vne7mIWF3pE+b462dtuQveOe76m8peRTqWIQCOWkK/oyyAAABFWElG2AAAAElJKgAIAAAABgASAQMAAQAAAAEAAAAaAQUAAQAAAFYAAAAbAQUAAQAAAF4AAAAoAQMAAQAAAAIAAAAxAQIAEQAAAGYAAABphwQAAQAAAHgAAAAAAAAA8nYBAOgDAADydgEA6AMAAHBhaW50Lm5ldCA0LjMuMTIAAAUAAJAHAAQAAAAwMjMwAaADAAEAAAABAAAAAqAEAAEAAAA8AAAAA6AEAAEAAAA8AAAABaAEAAEAAAC6AAAAAAAAAAIAAQACAAQAAABSOTgAAgAHAAQAAAAwMTAwAAAAAA==" class="rounded-circle me-1" s-alt="Fiona Green" width="40" height="40">
+                                <div class="flex-grow-1 ms-3">
+                                    Fiona Green
+                                    <div class="small"><span class="fas fa-circle chat-offline"></span> Offline</div>
+                                </div>
+                            </div>
+                        </a>
+                        <a href="#" class="list-group-item list-group-item-action border-0">
+                            <div class="d-flex align-items-start">
+                                <img src="data:image/webp;base64,UklGRjYFAABXRUJQVlA4WAoAAAAYAAAAOwAAOwAAQUxQSK4BAAABkHVtkyHJ2jMKs7Zt2zavbNu2cWXbtm3btm17u2cmY73xRURMgPlvcpocs/zf39bmJKPQCWlnWfRDY1LgxXrMws+zIOgPnp/XSvHJSIA/ku8XZfmeBHL8iN0Bn3OAvMb73gN4GoYqhTH0ggdxDzLWdidEvu8gfhEDMZrhjQHZP+POenKNGG9Li1FPBbyZxOZquBNZyj2jwbaU8q5r4CEkdU9FHyN1R0VTsZsq6otdV9FAyj2uor6Us0lFbSmaoaK82BANX5NImYYaLnli5a2CwK48MiGdZmhgnibT0rLO/jLVWGlhmRQBHR98Ge+xjgMkQ0t1jDHCBcNVNJByDmqwBaTMYA2fY4vlDlPwxBWjA7Ab4bOMfJ2AfQX5miCpDzCZKma3iAe+AUcOQxwlFH1ELDCwh4hmMHMGEEiG2wZYQzBaIhfIY/Aj5OYRjnrKdTD4+mFitgYuwg2WL4FrxPLhaWHp3gHCYqC8PQwMz4XqytDdLib9J0x4CYizisEXEwpFqdqjZ6OhFsVX68YU8Fs9YK3vFpUP+Y/kh1mzfTKxVBT6W8YbrN2+WNggDv0GVlA4IIICAADQDACdASo8ADwAPq1CnEgjIaEVCzV0MwrE4Av2w5j8EPLe8CXWlU01SKTvavxrq0zNGZJyjShExYDpzWw+tdZdD/6s2dl/jcHUOV2hwvZSTpwe9WM5OKfSLdj4suQNaKny3REjrl3oonIfCWrJGgAA/v98dR0dvmLaO0Q0zDGA7Rq1SO6cAv+GH0BGeEtTXysd7IHgeP0YYIv7M5QIvA/9//96rMTwlcv18yApwLRCI0IC+QgRkS1incn1QMorXhifiveM5lTgGHb1JzCDKyxcODi7s69Rc7lsj1YcvkrcEjyc6F7uIziv0OncYL8Knh24O3PEt3QT5p7YrVkGB9mGO0gl6PeS8qipu4/c69H4r70IVq/syZr+ckW1SgMPghUkdlfLfJ3WiIMp8LFgotYcE5peHG7N6LkpgjJR708uHluZR5CHVzpiPtVGXs6PEseTSK1IxlDlkVDV7ZAEqn6/tQSqwjdRAR49BvNbtga/Za4Y2fuah6SWlhP+IPYCntXSc0jnJgMoKVP93eMXQ0et5pHg4/JFaw1vySToYVsuav5Su0HSRpYfSOPn0Sz+6SIDz/8Gm1p312kzXUEHQXpt7rJ1YM7W9SzBo7x6bH6XRWK2nK0+FLBnPwqh0JzEAAP0LMJsINeGYeYZHbEo8PFGpF1reYOXGy//lLUkrBsKeftddNpGlsPpH3XmrtJUwDijAPVFD3mZ395yi9WOPBr1BZwtve10piBjZ8MI+obR2qqJ3CN0ZPL7sGHotEXY+8wbdR366KpSMeTzQ7Pz3MGkgmiWy+t65+qC9gYk5LBDpfkEpuX7I/Gkjokxd36Cvl4zNCNxLd8ai260u6h2ZhobAABFWElG2AAAAElJKgAIAAAABgASAQMAAQAAAAEAAAAaAQUAAQAAAFYAAAAbAQUAAQAAAF4AAAAoAQMAAQAAAAIAAAAxAQIAEQAAAGYAAABphwQAAQAAAHgAAAAAAAAA8nYBAOgDAADydgEA6AMAAHBhaW50Lm5ldCA0LjMuMTIAAAUAAJAHAAQAAAAwMjMwAaADAAEAAAABAAAAAqAEAAEAAAA8AAAAA6AEAAEAAAA8AAAABaAEAAEAAAC6AAAAAAAAAAIAAQACAAQAAABSOTgAAgAHAAQAAAAwMTAwAAAAAA==" class="rounded-circle me-1" s-alt="Dean Wilder" width="40" height="40">
+                                <div class="flex-grow-1 ms-3">
+                                    Dean Wilder
+                                    <div class="small"><span class="fas fa-circle chat-offline"></span> Offline</div>
+                                </div>
+                            </div>
+                        </a>
+                    </div>
+                </div>
+
+                <div class="col-12 col-lg-7 col-xl-8">
+                    <div class="s-chat-header py-2 px-4 d-none d-lg-block">
+                        <div class="d-flex align-items-center py-1">
+                            <div class="position-relative">
+                                <img src="data:image/webp;base64,UklGRuIDAABXRUJQVlA4WAoAAAAIAAAAOwAAOwAAVlA4IOQCAABQDwCdASo8ADwAPq1Sn0sjIiERBVQzCsTxgGQ+oiw9hENTwd9pzCmNOjgqz1BLR5pRtM5X9YOF7kGpZtljj+6ckXFyW2KsgCc8JYL9KurrK3EdBBMrGowoK9UZD/iTA+KbXYnE1cbGvu3c+JR1unsTXPYnwH9HfTmvCZToLAPWx0ZgAAD+9cR7DIxrZnbJjXE9lU58QYGFwJDpLWxoJ9rsw2loZFnhgjbjtYOK3RXspHa3War4aN+9zdH0d/yLDZ1++f3K7CMaYccYamwlYy3zOPreZxAaab+65YP2bdRK3aI2Ko/BYZHGHwSWPwMfoUnSLwB7Vt4QW/Drh6A6riCahnxfEl3vXACxlbbrKrc1A0vx2csOmv9K3bp2kJ/824w3f7S90Capou4AQB55p9QsJvQuSgk9IUJ/EySModtebrq1s+6GnSHo2tD6hXhVUUDhcvPdqIcjDapEej3Ifd7nN0XWDgRS+Cw1ze0STx2SohhMOpase21zKkfN08WMhQOFY9ZVwNrebUumtW0Va9UsqrZ6rGm6zCTkvllrSAQazUYH3OufacPWpBf5zo7I7Bf6hydXU2uCT5ZHlggyb88Smj5JLnIK/Qw/Qplnzkc8tEPmAVryyVAHJuGnLfjOKV6q/aBhmsxewLvKnAV35/cd2fhEsrct+flzIi99uoZ8MYMbGbKsvggeUckP79DhSk6uVyJbbNCTiGJrIwK1OCPtx5k/kI/RCX5iWmQNi5PvtKfh2GMxJn8kW+7SyRfgV+wHqnpAjqRyrYRWOqlbUFStsEzS6qie6dw5vz78c9Oyp3lDvjL1oAaBxHQafb4gdEOyhMV+Aot/W7MNXTA2jv0dK596U+n53w3BvhCP7HnUoZJ8dmyQOG44aHxyFsAGOzspba9AjjtTVadQlA55iLdUwXGxFkkt4kqIS97R8ZFo2zr/o51JN5J5MTffdtVBQmWBgYdBhaMmwiI/Jw3THMJyETAAAEVYSUbYAAAASUkqAAgAAAAGABIBAwABAAAAAQAAABoBBQABAAAAVgAAABsBBQABAAAAXgAAACgBAwABAAAAAgAAADEBAgARAAAAZgAAAGmHBAABAAAAeAAAAAAAAABgAAAAAQAAAGAAAAABAAAAcGFpbnQubmV0IDQuMy4xMgAABQAAkAcABAAAADAyMzABoAMAAQAAAAEAAAACoAQAAQAAADwAAAADoAQAAQAAADwAAAAFoAQAAQAAALoAAAAAAAAAAgABAAIABAAAAFI5OAACAAcABAAAADAxMDAAAAAA" class="rounded-circle me-1" s-alt="Vanessa Simons" width="40" height="40">
+                            </div>
+                            <div class="flex-grow-1 ps-3">
+                                <div class="text-muted small"><em>Typing...</em></div>
+                            </div>
+                            <div>
+                                <button class="btn btn-lg me-2 px-3"><i class="fa fa-phone"></i></button>
+                                <button class="btn btn-lg me-2 px-3"><i class="fa fa-video"></i></button>
+                                <button class="btn btn-lg px-2"><i class="fa fa-ellipsis-v"></i></button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="position-relative">
+                        <div class="s-chat-messages p-4">
+
+                            <div class="s-chat-message-own pb-4">
+                                <div>
+                                    <img src="data:image/webp;base64,UklGRuIDAABXRUJQVlA4WAoAAAAIAAAAOwAAOwAAVlA4IOQCAABQDwCdASo8ADwAPq1Sn0sjIiERBVQzCsTxgGQ+oiw9hENTwd9pzCmNOjgqz1BLR5pRtM5X9YOF7kGpZtljj+6ckXFyW2KsgCc8JYL9KurrK3EdBBMrGowoK9UZD/iTA+KbXYnE1cbGvu3c+JR1unsTXPYnwH9HfTmvCZToLAPWx0ZgAAD+9cR7DIxrZnbJjXE9lU58QYGFwJDpLWxoJ9rsw2loZFnhgjbjtYOK3RXspHa3War4aN+9zdH0d/yLDZ1++f3K7CMaYccYamwlYy3zOPreZxAaab+65YP2bdRK3aI2Ko/BYZHGHwSWPwMfoUnSLwB7Vt4QW/Drh6A6riCahnxfEl3vXACxlbbrKrc1A0vx2csOmv9K3bp2kJ/824w3f7S90Capou4AQB55p9QsJvQuSgk9IUJ/EySModtebrq1s+6GnSHo2tD6hXhVUUDhcvPdqIcjDapEej3Ifd7nN0XWDgRS+Cw1ze0STx2SohhMOpase21zKkfN08WMhQOFY9ZVwNrebUumtW0Va9UsqrZ6rGm6zCTkvllrSAQazUYH3OufacPWpBf5zo7I7Bf6hydXU2uCT5ZHlggyb88Smj5JLnIK/Qw/Qplnzkc8tEPmAVryyVAHJuGnLfjOKV6q/aBhmsxewLvKnAV35/cd2fhEsrct+flzIi99uoZ8MYMbGbKsvggeUckP79DhSk6uVyJbbNCTiGJrIwK1OCPtx5k/kI/RCX5iWmQNi5PvtKfh2GMxJn8kW+7SyRfgV+wHqnpAjqRyrYRWOqlbUFStsEzS6qie6dw5vz78c9Oyp3lDvjL1oAaBxHQafb4gdEOyhMV+Aot/W7MNXTA2jv0dK596U+n53w3BvhCP7HnUoZJ8dmyQOG44aHxyFsAGOzspba9AjjtTVadQlA55iLdUwXGxFkkt4kqIS97R8ZFo2zr/o51JN5J5MTffdtVBQmWBgYdBhaMmwiI/Jw3THMJyETAAAEVYSUbYAAAASUkqAAgAAAAGABIBAwABAAAAAQAAABoBBQABAAAAVgAAABsBBQABAAAAXgAAACgBAwABAAAAAgAAADEBAgARAAAAZgAAAGmHBAABAAAAeAAAAAAAAABgAAAAAQAAAGAAAAABAAAAcGFpbnQubmV0IDQuMy4xMgAABQAAkAcABAAAADAyMzABoAMAAQAAAAEAAAACoAQAAQAAADwAAAADoAQAAQAAADwAAAAFoAQAAQAAALoAAAAAAAAAAgABAAIABAAAAFI5OAACAAcABAAAADAxMDAAAAAA" class="rounded-circle me-1" s-alt="Chris Wood" width="40" height="40">
+                                    <div class="text-muted small text-nowrap mt-2">2:33 am</div>
+                                </div>
+                                <div class="s-chat-message-body flex-shrink-1 rounded py-2 px-3 me-3">
+                                    Lorem ipsum dolor sit amet, vis erat denique in, dicunt prodesset te vix.
+                                </div>
+                            </div>
+
+                            <div class="s-chat-message-other pb-4">
+                                <div>
+                                    <img src="data:image/webp;base64,UklGRuIDAABXRUJQVlA4WAoAAAAIAAAAOwAAOwAAVlA4IOQCAABQDwCdASo8ADwAPq1Sn0sjIiERBVQzCsTxgGQ+oiw9hENTwd9pzCmNOjgqz1BLR5pRtM5X9YOF7kGpZtljj+6ckXFyW2KsgCc8JYL9KurrK3EdBBMrGowoK9UZD/iTA+KbXYnE1cbGvu3c+JR1unsTXPYnwH9HfTmvCZToLAPWx0ZgAAD+9cR7DIxrZnbJjXE9lU58QYGFwJDpLWxoJ9rsw2loZFnhgjbjtYOK3RXspHa3War4aN+9zdH0d/yLDZ1++f3K7CMaYccYamwlYy3zOPreZxAaab+65YP2bdRK3aI2Ko/BYZHGHwSWPwMfoUnSLwB7Vt4QW/Drh6A6riCahnxfEl3vXACxlbbrKrc1A0vx2csOmv9K3bp2kJ/824w3f7S90Capou4AQB55p9QsJvQuSgk9IUJ/EySModtebrq1s+6GnSHo2tD6hXhVUUDhcvPdqIcjDapEej3Ifd7nN0XWDgRS+Cw1ze0STx2SohhMOpase21zKkfN08WMhQOFY9ZVwNrebUumtW0Va9UsqrZ6rGm6zCTkvllrSAQazUYH3OufacPWpBf5zo7I7Bf6hydXU2uCT5ZHlggyb88Smj5JLnIK/Qw/Qplnzkc8tEPmAVryyVAHJuGnLfjOKV6q/aBhmsxewLvKnAV35/cd2fhEsrct+flzIi99uoZ8MYMbGbKsvggeUckP79DhSk6uVyJbbNCTiGJrIwK1OCPtx5k/kI/RCX5iWmQNi5PvtKfh2GMxJn8kW+7SyRfgV+wHqnpAjqRyrYRWOqlbUFStsEzS6qie6dw5vz78c9Oyp3lDvjL1oAaBxHQafb4gdEOyhMV+Aot/W7MNXTA2jv0dK596U+n53w3BvhCP7HnUoZJ8dmyQOG44aHxyFsAGOzspba9AjjtTVadQlA55iLdUwXGxFkkt4kqIS97R8ZFo2zr/o51JN5J5MTffdtVBQmWBgYdBhaMmwiI/Jw3THMJyETAAAEVYSUbYAAAASUkqAAgAAAAGABIBAwABAAAAAQAAABoBBQABAAAAVgAAABsBBQABAAAAXgAAACgBAwABAAAAAgAAADEBAgARAAAAZgAAAGmHBAABAAAAeAAAAAAAAABgAAAAAQAAAGAAAAABAAAAcGFpbnQubmV0IDQuMy4xMgAABQAAkAcABAAAADAyMzABoAMAAQAAAAEAAAACoAQAAQAAADwAAAADoAQAAQAAADwAAAAFoAQAAQAAALoAAAAAAAAAAgABAAIABAAAAFI5OAACAAcABAAAADAxMDAAAAAA" class="rounded-circle me-1" s-alt="Vanessa Simons" width="40" height="40">
+                                    <div class="text-muted small text-nowrap mt-2">2:34 am</div>
+                                </div>
+                                <div class="s-chat-message-body flex-shrink-1 rounded py-2 px-3 ms-3">
+                                    
+                                    Sit meis deleniti eu, pri vidit meliore docendi ut, an eum erat animal commodo.
+                                </div>
+                            </div>
+
+                            <div class="s-chat-message-own mb-4">
+                                <div>
+                                    <img src="data:image/webp;base64,UklGRuIDAABXRUJQVlA4WAoAAAAIAAAAOwAAOwAAVlA4IOQCAABQDwCdASo8ADwAPq1Sn0sjIiERBVQzCsTxgGQ+oiw9hENTwd9pzCmNOjgqz1BLR5pRtM5X9YOF7kGpZtljj+6ckXFyW2KsgCc8JYL9KurrK3EdBBMrGowoK9UZD/iTA+KbXYnE1cbGvu3c+JR1unsTXPYnwH9HfTmvCZToLAPWx0ZgAAD+9cR7DIxrZnbJjXE9lU58QYGFwJDpLWxoJ9rsw2loZFnhgjbjtYOK3RXspHa3War4aN+9zdH0d/yLDZ1++f3K7CMaYccYamwlYy3zOPreZxAaab+65YP2bdRK3aI2Ko/BYZHGHwSWPwMfoUnSLwB7Vt4QW/Drh6A6riCahnxfEl3vXACxlbbrKrc1A0vx2csOmv9K3bp2kJ/824w3f7S90Capou4AQB55p9QsJvQuSgk9IUJ/EySModtebrq1s+6GnSHo2tD6hXhVUUDhcvPdqIcjDapEej3Ifd7nN0XWDgRS+Cw1ze0STx2SohhMOpase21zKkfN08WMhQOFY9ZVwNrebUumtW0Va9UsqrZ6rGm6zCTkvllrSAQazUYH3OufacPWpBf5zo7I7Bf6hydXU2uCT5ZHlggyb88Smj5JLnIK/Qw/Qplnzkc8tEPmAVryyVAHJuGnLfjOKV6q/aBhmsxewLvKnAV35/cd2fhEsrct+flzIi99uoZ8MYMbGbKsvggeUckP79DhSk6uVyJbbNCTiGJrIwK1OCPtx5k/kI/RCX5iWmQNi5PvtKfh2GMxJn8kW+7SyRfgV+wHqnpAjqRyrYRWOqlbUFStsEzS6qie6dw5vz78c9Oyp3lDvjL1oAaBxHQafb4gdEOyhMV+Aot/W7MNXTA2jv0dK596U+n53w3BvhCP7HnUoZJ8dmyQOG44aHxyFsAGOzspba9AjjtTVadQlA55iLdUwXGxFkkt4kqIS97R8ZFo2zr/o51JN5J5MTffdtVBQmWBgYdBhaMmwiI/Jw3THMJyETAAAEVYSUbYAAAASUkqAAgAAAAGABIBAwABAAAAAQAAABoBBQABAAAAVgAAABsBBQABAAAAXgAAACgBAwABAAAAAgAAADEBAgARAAAAZgAAAGmHBAABAAAAeAAAAAAAAABgAAAAAQAAAGAAAAABAAAAcGFpbnQubmV0IDQuMy4xMgAABQAAkAcABAAAADAyMzABoAMAAQAAAAEAAAACoAQAAQAAADwAAAADoAQAAQAAADwAAAAFoAQAAQAAALoAAAAAAAAAAgABAAIABAAAAFI5OAACAAcABAAAADAxMDAAAAAA" class="rounded-circle me-1" s-alt="Chris Wood" width="40" height="40">
+                                    <div class="text-muted small text-nowrap mt-2">2:35 am</div>
+                                </div>
+                                <div class="s-chat-message-body flex-shrink-1 rounded py-2 px-3 me-3">
+                                    Cum ea graeci tractatos.
+                                </div>
+                            </div>
+
+                            <div class="s-chat-message-other pb-4">
+                                <div>
+                                    <img src="data:image/webp;base64,UklGRuIDAABXRUJQVlA4WAoAAAAIAAAAOwAAOwAAVlA4IOQCAABQDwCdASo8ADwAPq1Sn0sjIiERBVQzCsTxgGQ+oiw9hENTwd9pzCmNOjgqz1BLR5pRtM5X9YOF7kGpZtljj+6ckXFyW2KsgCc8JYL9KurrK3EdBBMrGowoK9UZD/iTA+KbXYnE1cbGvu3c+JR1unsTXPYnwH9HfTmvCZToLAPWx0ZgAAD+9cR7DIxrZnbJjXE9lU58QYGFwJDpLWxoJ9rsw2loZFnhgjbjtYOK3RXspHa3War4aN+9zdH0d/yLDZ1++f3K7CMaYccYamwlYy3zOPreZxAaab+65YP2bdRK3aI2Ko/BYZHGHwSWPwMfoUnSLwB7Vt4QW/Drh6A6riCahnxfEl3vXACxlbbrKrc1A0vx2csOmv9K3bp2kJ/824w3f7S90Capou4AQB55p9QsJvQuSgk9IUJ/EySModtebrq1s+6GnSHo2tD6hXhVUUDhcvPdqIcjDapEej3Ifd7nN0XWDgRS+Cw1ze0STx2SohhMOpase21zKkfN08WMhQOFY9ZVwNrebUumtW0Va9UsqrZ6rGm6zCTkvllrSAQazUYH3OufacPWpBf5zo7I7Bf6hydXU2uCT5ZHlggyb88Smj5JLnIK/Qw/Qplnzkc8tEPmAVryyVAHJuGnLfjOKV6q/aBhmsxewLvKnAV35/cd2fhEsrct+flzIi99uoZ8MYMbGbKsvggeUckP79DhSk6uVyJbbNCTiGJrIwK1OCPtx5k/kI/RCX5iWmQNi5PvtKfh2GMxJn8kW+7SyRfgV+wHqnpAjqRyrYRWOqlbUFStsEzS6qie6dw5vz78c9Oyp3lDvjL1oAaBxHQafb4gdEOyhMV+Aot/W7MNXTA2jv0dK596U+n53w3BvhCP7HnUoZJ8dmyQOG44aHxyFsAGOzspba9AjjtTVadQlA55iLdUwXGxFkkt4kqIS97R8ZFo2zr/o51JN5J5MTffdtVBQmWBgYdBhaMmwiI/Jw3THMJyETAAAEVYSUbYAAAASUkqAAgAAAAGABIBAwABAAAAAQAAABoBBQABAAAAVgAAABsBBQABAAAAXgAAACgBAwABAAAAAgAAADEBAgARAAAAZgAAAGmHBAABAAAAeAAAAAAAAABgAAAAAQAAAGAAAAABAAAAcGFpbnQubmV0IDQuMy4xMgAABQAAkAcABAAAADAyMzABoAMAAQAAAAEAAAACoAQAAQAAADwAAAADoAQAAQAAADwAAAAFoAQAAQAAALoAAAAAAAAAAgABAAIABAAAAFI5OAACAAcABAAAADAxMDAAAAAA" class="rounded-circle me-1" s-alt="Vanessa Simons" width="40" height="40">
+                                    <div class="text-muted small text-nowrap mt-2">2:36 am</div>
+                                </div>
+                                <div class="s-chat-message-body flex-shrink-1 rounded py-2 px-3 ms-3">
+                                    Sed pulvinar, massa vitae interdum pulvinar, risus lectus porttitor magna, vitae commodo lectus mauris et velit.
+                                    Proin ultricies placerat imperdiet. Morbi varius quam ac venenatis tempus.
+                                </div>
+                            </div>
+
+                            <div class="s-chat-message-other pb-4">
+                                <div>
+                                    <img src="data:image/webp;base64,UklGRuIDAABXRUJQVlA4WAoAAAAIAAAAOwAAOwAAVlA4IOQCAABQDwCdASo8ADwAPq1Sn0sjIiERBVQzCsTxgGQ+oiw9hENTwd9pzCmNOjgqz1BLR5pRtM5X9YOF7kGpZtljj+6ckXFyW2KsgCc8JYL9KurrK3EdBBMrGowoK9UZD/iTA+KbXYnE1cbGvu3c+JR1unsTXPYnwH9HfTmvCZToLAPWx0ZgAAD+9cR7DIxrZnbJjXE9lU58QYGFwJDpLWxoJ9rsw2loZFnhgjbjtYOK3RXspHa3War4aN+9zdH0d/yLDZ1++f3K7CMaYccYamwlYy3zOPreZxAaab+65YP2bdRK3aI2Ko/BYZHGHwSWPwMfoUnSLwB7Vt4QW/Drh6A6riCahnxfEl3vXACxlbbrKrc1A0vx2csOmv9K3bp2kJ/824w3f7S90Capou4AQB55p9QsJvQuSgk9IUJ/EySModtebrq1s+6GnSHo2tD6hXhVUUDhcvPdqIcjDapEej3Ifd7nN0XWDgRS+Cw1ze0STx2SohhMOpase21zKkfN08WMhQOFY9ZVwNrebUumtW0Va9UsqrZ6rGm6zCTkvllrSAQazUYH3OufacPWpBf5zo7I7Bf6hydXU2uCT5ZHlggyb88Smj5JLnIK/Qw/Qplnzkc8tEPmAVryyVAHJuGnLfjOKV6q/aBhmsxewLvKnAV35/cd2fhEsrct+flzIi99uoZ8MYMbGbKsvggeUckP79DhSk6uVyJbbNCTiGJrIwK1OCPtx5k/kI/RCX5iWmQNi5PvtKfh2GMxJn8kW+7SyRfgV+wHqnpAjqRyrYRWOqlbUFStsEzS6qie6dw5vz78c9Oyp3lDvjL1oAaBxHQafb4gdEOyhMV+Aot/W7MNXTA2jv0dK596U+n53w3BvhCP7HnUoZJ8dmyQOG44aHxyFsAGOzspba9AjjtTVadQlA55iLdUwXGxFkkt4kqIS97R8ZFo2zr/o51JN5J5MTffdtVBQmWBgYdBhaMmwiI/Jw3THMJyETAAAEVYSUbYAAAASUkqAAgAAAAGABIBAwABAAAAAQAAABoBBQABAAAAVgAAABsBBQABAAAAXgAAACgBAwABAAAAAgAAADEBAgARAAAAZgAAAGmHBAABAAAAeAAAAAAAAABgAAAAAQAAAGAAAAABAAAAcGFpbnQubmV0IDQuMy4xMgAABQAAkAcABAAAADAyMzABoAMAAQAAAAEAAAACoAQAAQAAADwAAAADoAQAAQAAADwAAAAFoAQAAQAAALoAAAAAAAAAAgABAAIABAAAAFI5OAACAAcABAAAADAxMDAAAAAA" class="rounded-circle me-1" s-alt="Vanessa Simons" width="40" height="40">
+                                    <div class="text-muted small text-nowrap mt-2">2:37 am</div>
+                                </div>
+                                <div class="s-chat-message-body flex-shrink-1 rounded py-2 px-3 ms-3">
+                                    
+                                    Cras pulvinar, sapien id vehicula aliquet, diam velit elementum orci.
+                                </div>
+                            </div>
+
+                            <div class="s-chat-message-own mb-4">
+                                <div>
+                                    <img src="data:image/webp;base64,UklGRuIDAABXRUJQVlA4WAoAAAAIAAAAOwAAOwAAVlA4IOQCAABQDwCdASo8ADwAPq1Sn0sjIiERBVQzCsTxgGQ+oiw9hENTwd9pzCmNOjgqz1BLR5pRtM5X9YOF7kGpZtljj+6ckXFyW2KsgCc8JYL9KurrK3EdBBMrGowoK9UZD/iTA+KbXYnE1cbGvu3c+JR1unsTXPYnwH9HfTmvCZToLAPWx0ZgAAD+9cR7DIxrZnbJjXE9lU58QYGFwJDpLWxoJ9rsw2loZFnhgjbjtYOK3RXspHa3War4aN+9zdH0d/yLDZ1++f3K7CMaYccYamwlYy3zOPreZxAaab+65YP2bdRK3aI2Ko/BYZHGHwSWPwMfoUnSLwB7Vt4QW/Drh6A6riCahnxfEl3vXACxlbbrKrc1A0vx2csOmv9K3bp2kJ/824w3f7S90Capou4AQB55p9QsJvQuSgk9IUJ/EySModtebrq1s+6GnSHo2tD6hXhVUUDhcvPdqIcjDapEej3Ifd7nN0XWDgRS+Cw1ze0STx2SohhMOpase21zKkfN08WMhQOFY9ZVwNrebUumtW0Va9UsqrZ6rGm6zCTkvllrSAQazUYH3OufacPWpBf5zo7I7Bf6hydXU2uCT5ZHlggyb88Smj5JLnIK/Qw/Qplnzkc8tEPmAVryyVAHJuGnLfjOKV6q/aBhmsxewLvKnAV35/cd2fhEsrct+flzIi99uoZ8MYMbGbKsvggeUckP79DhSk6uVyJbbNCTiGJrIwK1OCPtx5k/kI/RCX5iWmQNi5PvtKfh2GMxJn8kW+7SyRfgV+wHqnpAjqRyrYRWOqlbUFStsEzS6qie6dw5vz78c9Oyp3lDvjL1oAaBxHQafb4gdEOyhMV+Aot/W7MNXTA2jv0dK596U+n53w3BvhCP7HnUoZJ8dmyQOG44aHxyFsAGOzspba9AjjtTVadQlA55iLdUwXGxFkkt4kqIS97R8ZFo2zr/o51JN5J5MTffdtVBQmWBgYdBhaMmwiI/Jw3THMJyETAAAEVYSUbYAAAASUkqAAgAAAAGABIBAwABAAAAAQAAABoBBQABAAAAVgAAABsBBQABAAAAXgAAACgBAwABAAAAAgAAADEBAgARAAAAZgAAAGmHBAABAAAAeAAAAAAAAABgAAAAAQAAAGAAAAABAAAAcGFpbnQubmV0IDQuMy4xMgAABQAAkAcABAAAADAyMzABoAMAAQAAAAEAAAACoAQAAQAAADwAAAADoAQAAQAAADwAAAAFoAQAAQAAALoAAAAAAAAAAgABAAIABAAAAFI5OAACAAcABAAAADAxMDAAAAAA" class="rounded-circle me-1" s-alt="Chris Wood" width="40" height="40">
+                                    <div class="text-muted small text-nowrap mt-2">2:38 am</div>
+                                </div>
+                                <div class="s-chat-message-body flex-shrink-1 rounded py-2 px-3 me-3">
+                                    Lorem ipsum dolor sit amet, vis erat denique in, dicunt prodesset te vix.
+                                </div>
+                            </div>
+
+                            <div class="s-chat-message-other pb-4">
+                                <div>
+                                    <img src="data:image/webp;base64,UklGRuIDAABXRUJQVlA4WAoAAAAIAAAAOwAAOwAAVlA4IOQCAABQDwCdASo8ADwAPq1Sn0sjIiERBVQzCsTxgGQ+oiw9hENTwd9pzCmNOjgqz1BLR5pRtM5X9YOF7kGpZtljj+6ckXFyW2KsgCc8JYL9KurrK3EdBBMrGowoK9UZD/iTA+KbXYnE1cbGvu3c+JR1unsTXPYnwH9HfTmvCZToLAPWx0ZgAAD+9cR7DIxrZnbJjXE9lU58QYGFwJDpLWxoJ9rsw2loZFnhgjbjtYOK3RXspHa3War4aN+9zdH0d/yLDZ1++f3K7CMaYccYamwlYy3zOPreZxAaab+65YP2bdRK3aI2Ko/BYZHGHwSWPwMfoUnSLwB7Vt4QW/Drh6A6riCahnxfEl3vXACxlbbrKrc1A0vx2csOmv9K3bp2kJ/824w3f7S90Capou4AQB55p9QsJvQuSgk9IUJ/EySModtebrq1s+6GnSHo2tD6hXhVUUDhcvPdqIcjDapEej3Ifd7nN0XWDgRS+Cw1ze0STx2SohhMOpase21zKkfN08WMhQOFY9ZVwNrebUumtW0Va9UsqrZ6rGm6zCTkvllrSAQazUYH3OufacPWpBf5zo7I7Bf6hydXU2uCT5ZHlggyb88Smj5JLnIK/Qw/Qplnzkc8tEPmAVryyVAHJuGnLfjOKV6q/aBhmsxewLvKnAV35/cd2fhEsrct+flzIi99uoZ8MYMbGbKsvggeUckP79DhSk6uVyJbbNCTiGJrIwK1OCPtx5k/kI/RCX5iWmQNi5PvtKfh2GMxJn8kW+7SyRfgV+wHqnpAjqRyrYRWOqlbUFStsEzS6qie6dw5vz78c9Oyp3lDvjL1oAaBxHQafb4gdEOyhMV+Aot/W7MNXTA2jv0dK596U+n53w3BvhCP7HnUoZJ8dmyQOG44aHxyFsAGOzspba9AjjtTVadQlA55iLdUwXGxFkkt4kqIS97R8ZFo2zr/o51JN5J5MTffdtVBQmWBgYdBhaMmwiI/Jw3THMJyETAAAEVYSUbYAAAASUkqAAgAAAAGABIBAwABAAAAAQAAABoBBQABAAAAVgAAABsBBQABAAAAXgAAACgBAwABAAAAAgAAADEBAgARAAAAZgAAAGmHBAABAAAAeAAAAAAAAABgAAAAAQAAAGAAAAABAAAAcGFpbnQubmV0IDQuMy4xMgAABQAAkAcABAAAADAyMzABoAMAAQAAAAEAAAACoAQAAQAAADwAAAADoAQAAQAAADwAAAAFoAQAAQAAALoAAAAAAAAAAgABAAIABAAAAFI5OAACAAcABAAAADAxMDAAAAAA" class="rounded-circle me-1" s-alt="Vanessa Simons" width="40" height="40">
+                                    <div class="text-muted small text-nowrap mt-2">2:39 am</div>
+                                </div>
+                                <div class="s-chat-message-body flex-shrink-1 rounded py-2 px-3 ms-3">
+                                    
+                                    Sit meis deleniti eu, pri vidit meliore docendi ut, an eum erat animal commodo.
+                                </div>
+                            </div>
+
+                            <div class="s-chat-message-own mb-4">
+                                <div>
+                                    <img src="data:image/webp;base64,UklGRuIDAABXRUJQVlA4WAoAAAAIAAAAOwAAOwAAVlA4IOQCAABQDwCdASo8ADwAPq1Sn0sjIiERBVQzCsTxgGQ+oiw9hENTwd9pzCmNOjgqz1BLR5pRtM5X9YOF7kGpZtljj+6ckXFyW2KsgCc8JYL9KurrK3EdBBMrGowoK9UZD/iTA+KbXYnE1cbGvu3c+JR1unsTXPYnwH9HfTmvCZToLAPWx0ZgAAD+9cR7DIxrZnbJjXE9lU58QYGFwJDpLWxoJ9rsw2loZFnhgjbjtYOK3RXspHa3War4aN+9zdH0d/yLDZ1++f3K7CMaYccYamwlYy3zOPreZxAaab+65YP2bdRK3aI2Ko/BYZHGHwSWPwMfoUnSLwB7Vt4QW/Drh6A6riCahnxfEl3vXACxlbbrKrc1A0vx2csOmv9K3bp2kJ/824w3f7S90Capou4AQB55p9QsJvQuSgk9IUJ/EySModtebrq1s+6GnSHo2tD6hXhVUUDhcvPdqIcjDapEej3Ifd7nN0XWDgRS+Cw1ze0STx2SohhMOpase21zKkfN08WMhQOFY9ZVwNrebUumtW0Va9UsqrZ6rGm6zCTkvllrSAQazUYH3OufacPWpBf5zo7I7Bf6hydXU2uCT5ZHlggyb88Smj5JLnIK/Qw/Qplnzkc8tEPmAVryyVAHJuGnLfjOKV6q/aBhmsxewLvKnAV35/cd2fhEsrct+flzIi99uoZ8MYMbGbKsvggeUckP79DhSk6uVyJbbNCTiGJrIwK1OCPtx5k/kI/RCX5iWmQNi5PvtKfh2GMxJn8kW+7SyRfgV+wHqnpAjqRyrYRWOqlbUFStsEzS6qie6dw5vz78c9Oyp3lDvjL1oAaBxHQafb4gdEOyhMV+Aot/W7MNXTA2jv0dK596U+n53w3BvhCP7HnUoZJ8dmyQOG44aHxyFsAGOzspba9AjjtTVadQlA55iLdUwXGxFkkt4kqIS97R8ZFo2zr/o51JN5J5MTffdtVBQmWBgYdBhaMmwiI/Jw3THMJyETAAAEVYSUbYAAAASUkqAAgAAAAGABIBAwABAAAAAQAAABoBBQABAAAAVgAAABsBBQABAAAAXgAAACgBAwABAAAAAgAAADEBAgARAAAAZgAAAGmHBAABAAAAeAAAAAAAAABgAAAAAQAAAGAAAAABAAAAcGFpbnQubmV0IDQuMy4xMgAABQAAkAcABAAAADAyMzABoAMAAQAAAAEAAAACoAQAAQAAADwAAAADoAQAAQAAADwAAAAFoAQAAQAAALoAAAAAAAAAAgABAAIABAAAAFI5OAACAAcABAAAADAxMDAAAAAA" class="rounded-circle me-1" s-alt="Chris Wood" width="40" height="40">
+                                    <div class="text-muted small text-nowrap mt-2">2:40 am</div>
+                                </div>
+                                <div class="s-chat-message-body flex-shrink-1 rounded py-2 px-3 me-3">
+                                    Cum ea graeci tractatos.
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="flex-grow-0 py-3 px-4">
+                        <div class="input-group">
+                            <input type="text" class="form-control" placeholder="Type your message">
+                            <button class="btn btn-primary">Send</button>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+        </div>
+        
+        <div class="card s-dashboard-card s-dashboard-todo">
+            <div class="card-header pb-0">
+                <h3 class="card-title">Tasks</h3>
+            </div>
+            <div class="card-body">
+                <ul class="s-todo-list">
+                    <li>
+                        <span class="handle">
+                            <i class="fa fa-grip-vertical"></i>
+                        </span>
+                        <input type="checkbox" class="form-check-input" value="" name="">
+                        <span class="text">Design the data model</span>
+                        <small class="label"><i class="fa fa-clock-o"></i> 10 mins</small>
+                    </li>
+                    <li>
+                        <span class="handle">
+                            <i class="fa fa-grip-vertical"></i>
+                        </span>
+                        <input type="checkbox" class="form-check-input" value="" name="">
+                        <span class="text">Prepare database migration</span>
+                        <small class="label"><i class="fa fa-clock-o"></i> 20 mins</small>
+                    </li>
+                    <li>
+                        <span class="handle">
+                            <i class="fa fa-grip-vertical"></i>
+                        </span>
+                        <input type="checkbox" class="form-check-input" value="" name="">
+                        <span class="text">Generate code with Sergen</span>
+                        <small class="label"><i class="fa fa-clock-o"></i> 5 mins</small>
+                    </li>
+                    <li>
+                        <span class="handle">
+                            <i class="fa fa-grip-vertical"></i>
+                        </span>
+                        <input type="checkbox" class="form-check-input" value="" name="">
+                        <span class="text">Refine generated code and UI</span>
+                        <small class="label"><i class="fa fa-clock-o"></i> 10 mins</small>
+                    </li>
+                    <li>
+                        <span class="handle">
+                            <i class="fa fa-grip-vertical"></i>
+                        </span>
+                        <input type="checkbox" class="form-check-input" value="" name="">
+                        <span class="text">Prepare unit tests</span>
+                        <small class="label label-primary"><i class="fa fa-clock-o"></i> 45 mins</small>
+                    </li>
+                    <li>
+                        <span class="handle">
+                            <i class="fa fa-grip-vertical"></i>
+                        </span>
+                        <input type="checkbox" class="form-check-input" value="" name="">
+                        <span class="text">Test on acceptance</span>
+                        <small class="label"><i class="fa fa-clock-o"></i> 15 mins</small>
+                    </li>
+                    <li>
+                        <span class="handle">
+                            <i class="fa fa-grip-vertical"></i>
+                        </span>
+                        <input type="checkbox" class="form-check-input" value="" name="">
+                        <span class="text">Prepare release notes</span>
+                        <small class="label"><i class="fa fa-clock-o"></i> 15 mins</small>
+                    </li>
+                    <li>
+                        <span class="handle">
+                            <i class="fa fa-grip-vertical"></i>
+                        </span>
+                        <input type="checkbox" class="form-check-input" value="" name="">
+                        <span class="text">Deploy to production</span>
+                        <small class="label"><i class="fa fa-clock-o"></i> 10 mins</small>
+                    </li>
+                </ul>
+            </div>
+            <div class="card-footer pt-0">
+                <div class="input-group">
+                    <input type="text" class="form-control" placeholder="type another task">
+                    <button class="btn btn-primary">Add</button>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="col-lg-5">
+        <div class="card s-dashboard-card s-dashboard-worldmap bg-world-map">
+            <div class="card-header d-flex">
+                <h3 class="card-title text-white">
+                    <i class="fa fa-map-marker"></i> Visitors
+                </h3>
+                <div class="ms-auto s-dashboard-card-tools">
+                    <button class="btn btn-primary btn-sm daterange" data-toggle="tooltip" title="Date range"><i class="fa fa-calendar"></i></button>
+                </div>
+            </div>
+            <div class="card-body">
+                <div id="world-map" style="height: 253px; width: 100%;"></div>
+            </div>
+            <div class="card-footer border-top-0">
+                <div class="row">
+                    <div class="col-4 text-center">
+                        <canvas class="sparkline-chart" id="sparkline-1" style="width: 70px; height: 40px;"></canvas>
+                        <div class="sparkline-label text-white text-opacity-75">New Visitors</div>
+                    </div>
+                    <div class="col-4 text-center">
+                        <canvas class="sparkline-chart" id="sparkline-2" style="width: 70px; height: 40px;"></canvas>
+                        <div class="sparkline-label text-white text-opacity-75">Online</div>
+                    </div>
+                    <div class="col-4 text-center">
+                        <canvas class="sparkline-chart" id="sparkline-3" style="width: 70px; height: 40px;"></canvas>
+                        <div class="sparkline-label text-white text-opacity-75">Returning</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card s-dashboard-card">
+            <div class="card-header d-flex">
+                <h3 class="card-title">Traffic &amp; Origin</h3>
+            </div>
+            <div class="card-body">
+                <canvas id="traffic-chart" style="height: 250px;"></canvas>
+            </div>
+            <div class="card-footer no-border">
+                <div class="row">
+                    <div class="col-4 text-center" style="border-right: 1px solid #f4f4f4; position: relative;">
+                        <span class="traffic-value">45</span>
+                        <canvas class="traffic-knob" style="width: 60px; height: 60px;"></canvas>
+                        <div class="knob-label">Search</div>
+                    </div>
+                    <div class="col-4 text-center" style="border-right: 1px solid #f4f4f4; position: relative;">
+                        <span class="traffic-value">20</span>
+                        <canvas class="traffic-knob" style="width: 60px; height: 60px;"></canvas>
+                        <div class="knob-label">Social</div>
+                    </div>
+                    <div class="col-4 text-center" style="position: relative;">
+                        <span class="traffic-value">35</span>
+                        <canvas class="traffic-knob" style="width: 60px; height: 60px;"></canvas>
+                        <div class="knob-label">Other</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card s-dashboard-card">
+            <div class="card-body p-0">
+                <div id="calendar" class="s-dashboard-calendar" style="width: 100%"></div>
+            </div>
+            <div class="card-footer py-4">
+                <div class="row">
+                    <div class="col-sm-6">
+                        <div class="clearfix">
+                            <span class="pull-left">Task #1</span>
+                            <small class="float-end">90%</small>
+                        </div>
+                        <div class="progress xs">
+                            <div class="progress-bar progress-bar-green" style="width: 90%;"></div>
+                        </div>
+                        <div class="clearfix">
+                            <span class="pull-left">Task #2</span>
+                            <small class="float-end">70%</small>
+                        </div>
+                        <div class="progress xs">
+                            <div class="progress-bar progress-bar-green" style="width: 70%;"></div>
+                        </div>
+                    </div>
+                    <div class="col-sm-6">
+                        <div class="clearfix">
+                            <span class="pull-left">Task #3</span>
+                            <small class="float-end">60%</small>
+                        </div>
+                        <div class="progress xs">
+                            <div class="progress-bar progress-bar-green" style="width: 60%;"></div>
+                        </div>
+                        <div class="clearfix">
+                            <span class="pull-left">Task #4</span>
+                            <small class="float-end">40%</small>
+                        </div>
+                        <div class="progress xs">
+                            <div class="progress-bar progress-bar-green" style="width: 40%;"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+</div>
+
+<script type="module">
+    import { DashboardPage } from '@Html.ResolveWithHash(ESM.Modules.Common.Dashboard.DashboardPage)';
+
+    @{
+        // assume this is coming from the Model
+        var visitorsByRegion = new Dictionary<string, int>
+        {
+            ["US"] = 398,
+            ["SA"] = 400,
+            ["CA"] = 1000,
+            ["DE"] = 500,
+            ["FR"] = 760,
+            ["CN"] = 300,
+            ["AU"] = 700,
+            ["BR"] = 600,
+            ["IN"] = 800,
+            ["GB"] = 320,
+            ["RU"] = 3000
+        };
+    }
+
+    DashboardPage(@Json.Serialize(new {
+        visitorsByRegion,
+        //someOtherData = Model.SomeOtherData
+    }));
+</script>

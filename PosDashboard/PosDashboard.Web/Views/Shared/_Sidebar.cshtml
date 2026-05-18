@@ -1,0 +1,204 @@
+@using Microsoft.Extensions.DependencyInjection
+@using Microsoft.Extensions.Options
+@model Serenity.Navigation.INavigationModel
+@inject ITextLocalizer Localizer
+@{
+    void renderItem(Serenity.Navigation.NavigationItem item, string parentId, int index) {
+        var isActive = Model.ActivePath.Contains(item);
+        var hasChildren = item.Children.Any();
+        var klass = "s-sidebar-item" + 
+            (item.IsSection ? " s-sidebar-section" : "") +
+            (isActive ? " active" : "") + 
+            (hasChildren ? " has-children" : "") +
+            (!string.IsNullOrEmpty(item.ItemClass) ? (" " + item.ItemClass) : "");
+        var icon = item.IconClass ?? "s-sidebar-noicon";
+        icon = icon.StartsWith("fa-") ? ("fa " + icon) : icon;
+        var title = Localizer.TryGet("Navigation." + item.FullPath) ?? item.Title;
+        var ulId = parentId + "_" + index;
+        var url = item.Url ?? (hasChildren ? ("#" + ulId) : "javascript:;");
+        var target = Html.Raw(item.Target != null ? (" target=" + item.Target) : "");
+        var bsToggle = Html.Raw(hasChildren ? " data-bs-toggle=\"collapse\"" : "");
+        var ariaExpanded = Html.Raw(hasChildren && isActive ? " aria-expanded=\"true\"" : "");
+        <li class="@klass">
+            @if (item.IsSection)
+            {
+                <h6 class="s-sidebar-section-title">@title</h6>
+                <ul id="@ulId" class="s-sidebar-section-menu">
+                @{var idx = 0;}
+                @foreach (var child in item.Children)
+                {
+                    renderItem(child, ulId, ++idx);
+                }
+                </ul>
+            }
+            else
+            {
+                <a class="s-sidebar-link" href="@url"@target@bsToggle@ariaExpanded>
+                    <i class="s-sidebar-icon @icon"></i>
+                    <span class="s-sidebar-link-text">@title</span>
+                    @if (hasChildren)
+                    {<em class="s-sidebar-menu-toggle fa fa-angle-right"></em>}
+                </a>
+                @if (hasChildren)
+                {
+                    <ul id="@ulId" class="s-sidebar-menu collapse@(isActive ? " show" : "")" data-bs-parent="#@parentId">
+                    @{var idx = 0;}
+                    @foreach (var child in item.Children)
+                    {
+                        renderItem(child, ulId, ++idx);
+                    }
+                    </ul>
+                }
+            }
+        </li>
+    }
+
+    async Task renderSharedActions(bool mobile)
+    {
+        var prefix = mobile ? "s-mobile-header" : "s-sidebar-band";
+        <li>
+            <div class="dropdown@(mobile ? "" : " dropend")">
+                <a href="javascript:;" class="@prefix-link s-language-selection-link" 
+                    data-bs-toggle="dropdown" title="switch language">
+                    <i class="@prefix-icon fa fa-language"></i>
+                </a>
+                <ul class="dropdown-menu@(mobile ? " dropdown-menu-end" : "") s-language-selection-menu">
+                </ul>
+            </div>
+        </li>
+        <li>
+            <div class="dropdown@(mobile ? "" : " dropend")">
+                <a href="javascript:;" class="@prefix-link s-theme-selection-link" 
+                    data-bs-toggle="dropdown" title="switch theme">
+                    <i class="@prefix-icon fa fa-fill-drip"></i>
+                </a>
+                <ul class="dropdown-menu@(mobile ? " dropdown-menu-end" : "") s-theme-selection-menu">
+                    <li><a class="dropdown-item" data-theme="azure-light" href="javascript:;">Azure (Light)</a></li>
+                    <li><a class="dropdown-item" data-theme="cosmos-dark" href="javascript:;">Cosmos (Dark)</a></li>
+                    <li><a class="dropdown-item" data-theme="glassy-light" href="javascript:;">Glassy (Light)</a></li>
+                </ul>
+            </div>
+        </li>
+        @if (User.IsLoggedIn())
+        {
+        <li>
+            <div class="dropdown@(mobile ? "" : " dropend")">
+                <a href="javascript:;" class="@prefix-link s-user-profile-link" 
+                    data-bs-toggle="dropdown" title="@User?.Identity?.Name">
+                    <i class="@prefix-icon fa fa-user"></i>
+                </a>
+                <div class="dropdown-menu dropdown-menu-md@(mobile ? " dropdown-menu-end" : "") s-user-profile-menu">
+                    <div class="s-user-card p-1 mb-2 text-center border-bottom">
+                        <h2 class="s-user-avatar fs-1 mb-0">
+                            <i class="fa fa-user"></i>
+                        </h2>
+                        <p class="s-user-info fs-6 mb-1">
+                            @Context.User?.Identity?.Name
+                        </p>
+                    </div>
+                    <a class="dropdown-item" href="~/Account/ChangePassword">
+                        <em class="icon fa fa-key"></em><span> @Serenity.Extensions.ExtensionsTexts.Forms.Membership.ChangePassword.FormTitle.ToString(Localizer)</span>
+                    </a>
+<!--#if (OpenIdClient)-->
+                    @{
+#if (OpenIdClient)
+                        var options = Context.RequestServices.GetRequiredService<IOptions<OpenIddict.Client.OpenIddictClientOptions>>();
+                        if (options.Value.Registrations.Any())
+                        {
+                            <a class="dropdown-item" href="~/Account/ExternalLogins">
+                                <em class="icon fa fa-link"></em><span>@Serenity.Pro.OpenIdClient.OpenIdClientTexts.Forms.Membership.ExternalLogins.MenuItem.ToString(Localizer)</span>
+                            </a>                                
+                        }
+#endif
+                    }
+<!--#endif-->
+                    <a class="dropdown-item" href="~/Account/Signout">
+                        <em class="icon fa fa-sign-out-alt"></em><span> @Texts.Navigation.LogoutLink.ToString(Localizer)</span>
+                    </a>
+                </div>
+            </div>
+        </li>
+        }
+    }
+}
+
+<aside class="s-sidebar" id="s-sidebar">
+    <div class="s-sidebar-band">
+        <ul class="s-sidebar-band-groups">
+        @{var grp = 0;}
+        @foreach (var group in Model.Items)
+        {
+            var groupActive = Model.ActivePath.Contains(group) || (!Model.ActivePath.Any() && grp == 0);
+            <li class="@(groupActive ? "active": "")">
+                <a class="s-sidebar-band-link" href="@(!string.IsNullOrEmpty(group.Url) ? group.Url: "#s_sidebar_group" + (++grp))" title="@group.Title">
+                    <i class="s-sidebar-band-icon fa @(group.IconClass ?? "fa-folder")"></i>
+                </a>
+            </li>
+        }
+        </ul>
+        <div class="s-sidebar-band-middle">
+            <div class="s-sidebar-band-branding">
+                <img class="s-site-logo-img s-sidebar-band-logo" />
+                @if (Texts.Navigation.SiteTitle.ToString(Localizer) == "Start" + "Sharp")
+                {
+                    <span class="s-sidebar-band-title">Start</span><span class="s-sidebar-band-title2">Sharp</span>
+                }
+                else 
+                {
+                    <span class="s-sidebar-band-title">@Texts.Navigation.SiteTitle.ToString(Localizer)</span>
+                }
+            </div>
+        </div>
+        <ul class="s-sidebar-band-actions">
+            @{await renderSharedActions(mobile: false);}
+            <li class="s-sidebar-pane-toggle">
+                <a href="javascript:;" class="s-sidebar-band-link s-sidebar-pane-toggle-link"
+                    title="toggle sidebar">
+                    <i class="s-sidebar-band-icon fa fa-angle-double-left"></i>
+                </a>
+            </li>
+        </ul>
+    </div>
+    <div class="s-sidebar-pane">
+        <div id="s-sidebar-search" class="s-sidebar-search m-3">
+            <i class="fa fa-search fa-flip-horizontal s-sidebar-search-icon"></i>
+            <input id="s-sidebar-search-input" type="text" class="w-100 s-sidebar-search-input" placeholder="@Serenity.Web.WebTexts.Controls.QuickSearch.Placeholder.ToString(Localizer)">
+        </div>
+        <div class="s-sidebar-groups">
+            @{grp = 0;}
+            @foreach (var group in Model.Items)
+            {
+                if (!string.IsNullOrEmpty(group.Url))
+                    continue;
+                var groupActive = Model.ActivePath.Contains(group) || (!Model.ActivePath.Any() && grp == 0);
+                var groupTitle = Localizer.TryGet("Navigation." + group.FullPath) ?? group.Title;
+                <div class="s-sidebar-group@(groupActive ? " active": "")" id="s_sidebar_group@(++grp)">
+                    <h5 class="s-sidebar-group-title">@groupTitle</h5>
+                    @if (group.Children.Any())
+                    {
+                        <ul class="s-sidebar-menu" id="s_sidebar_menu@(grp)">
+                            @{var itm = 0;}
+                            @foreach (var item in group.Children)
+                            {
+                                renderItem(item, "nav_menu" + grp, ++itm);
+                            }
+                        </ul>
+                    }
+                </div>
+            }
+        </div>
+    </div>
+</aside>
+
+<header class="navbar sticky-top s-mobile-header">
+    <button class="s-sidebar-toggler" type="button" id="s-sidebar-toggler"
+        aria-controls="navbarResponsive" aria-expanded="false" aria-label="Toggle navigation">
+        <i class="fa fa-bars"></i>
+    </button>
+    <div class="s-mobile-header-branding">
+        <img class="s-site-logo-img s-mobile-header-logo" />
+    </div>
+    <ul class="s-mobile-header-actions">
+        @{await renderSharedActions(mobile: true);}
+    </ul>
+</header>

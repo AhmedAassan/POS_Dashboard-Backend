@@ -1,0 +1,33 @@
+@inject Microsoft.Extensions.Options.IOptions<Serenity.Extensions.EnvironmentSettings> EnvironmentOptions
+@if (ViewData["IsPublicDemo"] as bool? == true)
+{
+    var currentUICulture = System.Globalization.CultureInfo.CurrentUICulture;
+
+    var playStoreImageCulture = currentUICulture.TwoLetterISOLanguageName;
+    
+    if (playStoreImageCulture == "zh")
+    {
+        playStoreImageCulture = currentUICulture.Name.ToLowerInvariant();
+    }
+
+    var playStoreImageSource = $"https://play.google.com/intl/en_us/badges/static/images/badges/{playStoreImageCulture}_badge_{(playStoreImageCulture == "en" ? "print" : "web")}_generic.png";
+    var appStoreImageSource = $"https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/{currentUICulture.Name.ToLowerInvariant()}?size=250x83";
+
+    <div class="s-container-tight mt-3">
+        <div class="alert alert-info alert-dismissible pt-1 pb-1">
+            <input type="hidden" id="IsPublicDemo" value="1" />
+            <div class="text-center">
+                <i class="fa fa-lightbulb text-warning"></i> <small>demo user: <b>admin</b>, password: <b>serenity</b></small>
+            </div>
+        </div>
+    </div>
+
+    <div class="s-container-tight" style="display:flex; justify-content: center; align-items: center;">
+        <a href="https://play.google.com/store/apps/details?id=com.serenity.demoapp" target="_blank">
+            <img height="60" alt="Get it on Google Play" src=@playStoreImageSource />
+        </a>
+        <a href="https://apps.apple.com/app/serenity-demo/id1661650380" style="margin-left: 10px;" target="_blank">
+            <img height="48" alt="Get it on App Store" src=@appStoreImageSource />
+        </a>
+    </div>
+}

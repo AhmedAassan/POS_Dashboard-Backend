@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../../../../Modules/Administration/Translation/TranslationPage.ts"],
+  "sourcesContent": ["import { initFullHeightGridPage } from \"@serenity-is/corelib/q\";\nimport { TranslationGrid } from \"@serenity-is/pro.extensions\";\n\nexport default function pageInit() {\n    initFullHeightGridPage(new TranslationGrid($('#GridDiv')).element);\n}"],
+  "mappings": "4HAAA,IAAAA,EAAuC,SACvCC,EAAgC,SAEjB,SAARC,GAA4B,IAC/B,0BAAuB,IAAI,kBAAgB,EAAE,UAAU,CAAC,EAAE,OAAO,CACrE,CAFwBC,EAAAD,EAAA",
+  "names": ["import_q", "import_pro", "pageInit", "__name"]
+}

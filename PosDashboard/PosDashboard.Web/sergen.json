@@ -1,0 +1,12 @@
+{
+  "Extends": "defaults@6.6.0",
+  "EnableGenerateFields": true,
+  "RootNamespace": "PosDashboard",
+  "ServerTypings": {
+    "LocalTexts": true
+  },
+  "UpgradeInfo": {
+    "InitialType": "Premium",
+    "InitialVersion": "6.8.1.0"
+  }
+}

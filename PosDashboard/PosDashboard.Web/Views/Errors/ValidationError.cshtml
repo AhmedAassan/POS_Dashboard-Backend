@@ -1,0 +1,59 @@
+﻿@model Serenity.Services.ValidationError
+@inject ITextLocalizer Localizer
+
+@{
+    ViewData["Title"] = Texts.Site.ValidationError.Title.ToString(Localizer);
+    ViewData["PageId"] = "ValidationError";
+    Layout = User.IsLoggedIn() ? MVC.Views.Shared._Layout : MVC.Views.Shared._LayoutNoNavigation;
+}
+
+<style type="text/css">
+    .error-container {
+    }
+
+    .error-container .alert {
+        padding: 30px;
+        margin: 100px auto;
+        min-height: 170px;
+        max-width: 70%;
+        min-width: 400px;
+    }
+
+    h1 {
+        color: red;
+        font-size: 30px;
+    }
+
+    h3 {
+        font-size: 18px;
+        color: maroon;
+        margin-top: 16px;
+        line-height: 26px;
+    }
+
+    a.redirect {
+        display: block;
+        float: left;
+        margin-top: 40px;
+        font-size: 14px;
+    }
+
+    div.date-time {
+        float: right;
+        margin-top: 40px;
+        font-weight: bold;
+        font-style: italic;
+        color: #966;
+    }
+</style>
+
+<div class="container error-container">
+    <div class="alert alert-danger">
+        <h1><i class="fa fa-times-circle text-danger"></i> @Texts.Site.ValidationError.Title.ToString(Localizer)</h1>
+        <h3>@Model.Message</h3>
+        <div class="date-time">
+            @DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss")
+        </div>
+        <div class="clear"></div>
+    </div>
+</div>

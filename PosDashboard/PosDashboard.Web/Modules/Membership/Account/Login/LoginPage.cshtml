@@ -1,0 +1,23 @@
+@inject ITextLocalizer Localizer
+@model PosDashboard.Membership.LoginPageModel
+@{
+    ViewData["Title"] = Texts.Forms.Membership.Login.LoginToYourAccount.ToString(Localizer);
+    ViewData["PageId"] = "Login";
+    Layout = MVC.Views.Shared._LayoutNoNavigation;
+}
+<partial name="@MVC.Views.Membership.Account.Login._MigrationWarning" />
+<partial name="@MVC.Views.Membership.Account.Login._ActivationComplete" />
+
+<div class="s-full-page justify-content-center">
+    <div id="LoginPanel" class="s-container-tight s-vertical-form"></div>
+    <partial name="@MVC.Views.Membership.Account.Login._StoreLinks" />
+</div>
+
+<script type="module">
+    import pageInit from '@Html.ResolveWithHash(ESM.Modules.Membership.Account.Login.LoginPage)';
+    pageInit(@Json.Serialize(new { 
+        activated = ViewData["Activated"]?.ToString(), 
+        isPublicDemo = ViewData["IsPublicDemo"] as bool? == true,
+        model = Model
+    }));
+</script>

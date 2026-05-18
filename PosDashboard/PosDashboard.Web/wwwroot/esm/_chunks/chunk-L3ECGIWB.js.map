@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["external-global:Q"],
+  "sourcesContent": ["module.exports = Q;"],
+  "mappings": "qtDAAA,IAAAA,EAAAC,EAAA,CAAAC,EAAAC,IAAA,CAAAA,EAAO,QAAU",
+  "names": ["require_Q", "__commonJSMin", "exports", "module"]
+}
