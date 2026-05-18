@@ -38,36 +38,41 @@ namespace PosDashboard.Web.Modules.System
                     return Ok(new ApiResult<DashboardSummaryDto>(false, "branchId is required", null));
 
                 if (!DateTime.TryParseExact(date, "yyyy-MM-dd",
-                        CultureInfo.InvariantCulture, DateTimeStyles.None, out var dateOnly))
-                    return Ok(new ApiResult<DashboardSummaryDto>(false,
-                        "date must be yyyy-MM-dd", null));
-
-                var dateStart = dateOnly.Date;
-                var dateEnd = dateStart.AddDays(1);
+                    CultureInfo.InvariantCulture, DateTimeStyles.None, out var dateOnly))
+                                return Ok(new ApiResult<DashboardSummaryDto>(false,
+                                    "date must be yyyy-MM-dd", null));
 
                 using var conn = sqlConnections.NewByKey("Default");
+
+                // Meta query first, so we can understand tzOffset
+                var metaP = new { BranchId = branchId };
+
+                var meta = SqlMapper.Query<dynamic>(conn, @"
+                SELECT
+                    (SELECT TRY_CAST(SETTING_VALUE AS int) FROM dbo.SYSTEM_SETTING WHERE SETTING_KEY = 'calendarStartHour') AS StartHour,
+                    (SELECT TRY_CAST(SETTING_VALUE AS int) FROM dbo.SYSTEM_SETTING WHERE SETTING_KEY = 'calendarEndHour')   AS EndHour,
+                    (SELECT TRY_CAST(SETTING_VALUE AS int) FROM dbo.SYSTEM_SETTING WHERE SETTING_KEY = 'timeZoneOffset')    AS TzOffset,
+                    (SELECT EnglishCurrencyName FROM dbo.BRANCH WHERE BRANCH_ID = @BranchId)                                AS Currency",
+                                metaP).FirstOrDefault();
+
+                int startHour = meta?.StartHour != null ? (int)meta.StartHour : 10;
+                int endHour = meta?.EndHour != null ? (int)meta.EndHour : 22;
+                string currency = meta?.Currency != null ? (string)meta.Currency : "KWD";
+                int workdayMinutes = Math.Max(1, (endHour - startHour) * 60);
+                int tzOffset = meta?.TzOffset != null ? (int)meta.TzOffset : 3;
+
+                
+                var dateStart = dateOnly.Date.AddHours(-tzOffset);
+                var dateEnd = dateStart.AddDays(1);
 
                 var p = new
                 {
                     BranchId = branchId,
                     DateStart = dateStart,
                     DateEnd = dateEnd,
-                    DateOnly = dateStart.Date,
+                    DateOnly = dateOnly.Date,   // ← Must prefer local date (without offset)
                     StaffId = staffId
                 };
-
-                // ---------- Meta ----------
-                var meta = SqlMapper.Query<dynamic>(conn, @"
-                SELECT
-                    (SELECT TRY_CAST(SETTING_VALUE AS int) FROM dbo.SYSTEM_SETTING WHERE SETTING_KEY = 'calendarStartHour') AS StartHour,
-                    (SELECT TRY_CAST(SETTING_VALUE AS int) FROM dbo.SYSTEM_SETTING WHERE SETTING_KEY = 'calendarEndHour')   AS EndHour,
-                    (SELECT EnglishCurrencyName FROM dbo.BRANCH WHERE BRANCH_ID = @BranchId)                                AS Currency",
-                    p).FirstOrDefault();
-
-                int startHour = meta?.StartHour != null ? (int)meta.StartHour : 10;
-                int endHour = meta?.EndHour != null ? (int)meta.EndHour : 22;
-                string currency = meta?.Currency != null ? (string)meta.Currency : "KWD";
-                int workdayMinutes = Math.Max(1, (endHour - startHour) * 60);
 
                 // ---------- 2A: Revenue KPIs ----------
                 var kpi = SqlMapper.Query<dynamic>(conn, @"
@@ -603,7 +608,7 @@ namespace PosDashboard.Web.Modules.System
                     SUM(CASE WHEN ServiceType = 'HOME'  THEN 1 ELSE 0 END) AS HomeCount
                 FROM dbo.AppointmentData
                 WHERE BranchId = @BranchId
-                  AND AppointmentDate >= @DateStart AND AppointmentDate < @DateEnd
+                  AND AppointmentDate = @DateOnly
                   AND (@StaffId IS NULL OR StaffId = @StaffId);",
                     p).FirstOrDefault();
 
@@ -677,7 +682,7 @@ namespace PosDashboard.Web.Modules.System
                 INNER JOIN dbo.ITEM                  i   ON i.ITEM_ID = a.ItemId
                 INNER JOIN dbo.AppointmentCategories ac  ON ac.Id = i.AppointmentCategoryId
                 WHERE a.BranchId = @BranchId
-                  AND a.AppointmentDate >= @DateStart AND a.AppointmentDate < @DateEnd
+                  AND a.AppointmentDate = @DateOnly
                   AND (@StaffId IS NULL OR a.StaffId = @StaffId)
                   AND ISNULL(ac.Deleted, 0) = 0
                 GROUP BY ac.EnglishName
