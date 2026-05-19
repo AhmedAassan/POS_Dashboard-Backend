@@ -78,15 +78,16 @@ namespace PosDashboard.Web.Modules.System
                 var kpi = SqlMapper.Query<dynamic>(conn, @"
                     ;WITH
                     CheckoutToday AS (
-                        -- بس الـ FULL payments غير الـ Wallet (مش الـ Deposits)
                         SELECT ISNULL(SUM(ap.Amount), 0) AS TotalInvoicePaid
                         FROM dbo.AppointmentPayments ap
                         INNER JOIN dbo.AppointmentInvoices inv ON inv.AppointmentId = ap.AppointmentId
                         INNER JOIN dbo.AppointmentData a ON a.Id = ap.AppointmentId
+                        INNER JOIN dbo.INVOICE_PAYMENT_TYPE pt ON pt.INVOICE_PAYMENT_TYPE_ID = ap.PaymentTypeId  
                         WHERE a.BranchId = @BranchId
                           AND inv.CreatedAt >= @DateStart AND inv.CreatedAt < @DateEnd
                           AND ap.IsWalletPayment = 0
                           AND ap.PaymentAs = 'FULL'
+                          AND ISNULL(pt.OnlinePayment, 0) = 0   
                           AND (@StaffId IS NULL OR a.StaffId = @StaffId)
                     ),
                     DepositsToday AS (
@@ -126,19 +127,35 @@ namespace PosDashboard.Web.Modules.System
                         WHERE c.BRANCH_ID = @BranchId
                           AND ISNULL(pp.Deleted, 0) = 0
                           AND pp.AddedDate >= @DateStart AND pp.AddedDate < @DateEnd
+                    ),
+                    OnlineFullToday AS (
+                        SELECT ISNULL(SUM(ap.Amount), 0) AS OnlineFullRevenue
+                        FROM dbo.AppointmentPayments ap
+                        INNER JOIN dbo.AppointmentInvoices inv ON inv.AppointmentId = ap.AppointmentId
+                        INNER JOIN dbo.AppointmentData a ON a.Id = ap.AppointmentId
+                        INNER JOIN dbo.INVOICE_PAYMENT_TYPE pt ON pt.INVOICE_PAYMENT_TYPE_ID = ap.PaymentTypeId
+                        WHERE a.BranchId = @BranchId
+                          AND inv.CreatedAt >= @DateStart AND inv.CreatedAt < @DateEnd
+                          AND ap.IsWalletPayment = 0
+                          AND ap.PaymentAs = 'FULL'
+                          AND ISNULL(pt.OnlinePayment, 0) = 1   
+                          AND (@StaffId IS NULL OR a.StaffId = @StaffId)
                     )
                     SELECT
-                    c.TotalInvoicePaid AS TotalCheckoutRevenue,
-                    d.TodayDepositRevenue,
-                    p.PendingFromDeposits,
-                    wal.WalletRevenue,
-                    pk.PackagesRevenue,
-                    (c.TotalInvoicePaid + d.TodayDepositRevenue + wal.WalletRevenue + pk.PackagesRevenue) AS TotalEffectiveRevenue
-                FROM CheckoutToday c
-                CROSS JOIN DepositsToday d
-                CROSS JOIN PendingDeposits p
-                CROSS JOIN WalletToday wal
-                CROSS JOIN PackagesToday pk;",
+                        c.TotalInvoicePaid        AS TotalCheckoutRevenue,
+                        d.TodayDepositRevenue,
+                        p.PendingFromDeposits,
+                        wal.WalletRevenue,
+                        pk.PackagesRevenue,
+                        onl.OnlineFullRevenue,   
+                        (c.TotalInvoicePaid + d.TodayDepositRevenue + wal.WalletRevenue 
+                         + pk.PackagesRevenue + onl.OnlineFullRevenue) AS TotalEffectiveRevenue 
+                    FROM CheckoutToday c
+                    CROSS JOIN DepositsToday d
+                    CROSS JOIN PendingDeposits p
+                    CROSS JOIN WalletToday wal
+                    CROSS JOIN PackagesToday pk
+                    CROSS JOIN OnlineFullToday onl;",
                         p).FirstOrDefault();
 
                 decimal totalCheckout = kpi != null ? (decimal)kpi.TotalCheckoutRevenue : 0m;
@@ -146,6 +163,7 @@ namespace PosDashboard.Web.Modules.System
                 decimal pendingDeposit = kpi != null ? (decimal)kpi.PendingFromDeposits : 0m;
                 decimal walletRev = kpi != null ? (decimal)kpi.WalletRevenue : 0m;
                 decimal packagesRev = kpi != null ? (decimal)kpi.PackagesRevenue : 0m;
+                decimal onlineFullRev = kpi != null ? (decimal)kpi.OnlineFullRevenue : 0m;  
                 decimal totalEffective = kpi != null ? (decimal)kpi.TotalEffectiveRevenue : 0m;
 
                 // ---------- 2B: Payment Type Breakdown ----------
@@ -766,6 +784,7 @@ namespace PosDashboard.Web.Modules.System
                     PendingFromDeposits: pendingDeposit,
                     WalletRevenue: walletRev,
                     PackagesRevenue: packagesRev,
+                    OnlineFullRevenue: onlineFullRev,
                     TotalEffectiveRevenue: totalEffective,
                     PaymentTypeBreakdown: paymentBreakdown,
                     Transactions: transactions,

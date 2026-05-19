@@ -15,6 +15,7 @@ namespace PosDashboard.Web.Modules.System.Models
             decimal PendingFromDeposits,
             decimal WalletRevenue,
             decimal PackagesRevenue,
+            decimal OnlineFullRevenue,
             decimal TotalEffectiveRevenue,
 
             // 2B — Payment Breakdown
