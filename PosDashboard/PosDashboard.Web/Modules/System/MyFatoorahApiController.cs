@@ -392,7 +392,8 @@ namespace PosDashboard.Web.Modules.System
                 if (isPaid)
                 {
                     var apt = conn.Query<dynamic>(@"
-                        SELECT TotalPrice, PaidAmount FROM dbo.AppointmentData 
+                        SELECT TotalPrice, PaidAmount, BranchId, CustomerId 
+                        FROM dbo.AppointmentData 
                         WHERE Id = @Id",
                         new { Id = appointmentId }).FirstOrDefault();
 
@@ -444,10 +445,10 @@ namespace PosDashboard.Web.Modules.System
                         SqlMapper.Execute(conn, @"
                             INSERT INTO dbo.AppointmentPayments 
                                 (AppointmentId, Amount, PaymentTypeId, PaymentAs, 
-                                 VoucherCode, PaidAt)
+                                 VoucherCode, PaidAt, IsWalletPayment)  
                             VALUES 
                                 (@AppointmentId, @Amount, @PaymentTypeId,
-                                 @PaymentAs, NULL, SYSUTCDATETIME())",
+                                 @PaymentAs, NULL, SYSUTCDATETIME(), 0)", 
                             new
                             {
                                 AppointmentId = appointmentId,
@@ -455,6 +456,58 @@ namespace PosDashboard.Web.Modules.System
                                 PaymentTypeId = onlinePaymentTypeId!.Value,
                                 PaymentAs = paymentAs
                             });
+
+                        // ← أضف ده: لو FULL، اعمل Invoice وعمل checkout
+                        if (paymentAs == "FULL")
+                        {
+                            var existingInvoice = conn.Query<int?>(@"
+                                SELECT TOP 1 Id FROM dbo.AppointmentInvoices 
+                                WHERE AppointmentId = @Id",
+                                new { Id = appointmentId }).FirstOrDefault();
+
+                            if (existingInvoice == null)
+                            {
+                                // جيب الـ currency من الـ Branch
+                                var invoiceCurrency = conn.Query<string>(@"
+                                SELECT EnglishCurrencyName FROM dbo.BRANCH 
+                                WHERE BRANCH_ID = @Id",
+                                    new { Id = (int)apt.BranchId }).FirstOrDefault() ?? "KWD";
+
+                                var invoiceNumber = $"INV-{DateTime.UtcNow:yyyyMMdd}-{appointmentId}";
+
+                                conn.Execute(@"
+                                INSERT INTO dbo.AppointmentInvoices (
+                                    InvoiceNumber, AppointmentId, BranchId, CustomerId,
+                                    TotalAmount, PaidAmount, RemainingAmount, Currency,
+                                    PaymentTypeId, PaymentStatus, CreatedAt
+                                )
+                                VALUES (
+                                    @InvoiceNumber, @AppointmentId, @BranchId, @CustomerId,
+                                    @TotalAmount, @PaidAmount, 0, @Currency,
+                                    @PaymentTypeId, 'FULL', SYSUTCDATETIME()
+                                )",
+                                    new
+                                    {
+                                        InvoiceNumber = invoiceNumber,
+                                        AppointmentId = appointmentId,
+                                        BranchId = (int)apt.BranchId,
+                                        CustomerId = (int)apt.CustomerId,
+                                        TotalAmount = amount,
+                                        PaidAmount = amount,
+                                        Currency = invoiceCurrency,
+                                        PaymentTypeId = onlinePaymentTypeId!.Value
+                                    });
+                            }
+
+                            // عمل checkout للـ appointment
+                            conn.Execute(@"
+                        UPDATE dbo.AppointmentData SET
+                            CheckoutStatus = 'checked_out',
+                            Status = 'completed',
+                            UpdatedAt = SYSUTCDATETIME()
+                        WHERE Id = @Id AND CheckoutStatus != 'checked_out'",
+                                                new { Id = appointmentId });
+                        }
 
                         try
                         {
