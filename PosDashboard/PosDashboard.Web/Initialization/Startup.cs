@@ -27,6 +27,8 @@ using System;
 using System.Data.Common;
 using System.IO;
 using System.Text;
+using System.Text.Json;
+using static Serenity.CoreTexts;
 
 namespace PosDashboard
 {
@@ -206,6 +208,11 @@ namespace PosDashboard
             //new
             services.AddScoped<JwtTokenService>();
             services.AddHttpClient();
+
+
+            services.AddControllers()
+            .AddJsonOptions(x =>
+            x.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase);
         }
 
         public static void InitializeLocalTexts(IServiceProvider services)

@@ -184,7 +184,10 @@ namespace PosDashboard.Web.Modules.System
                     c.CUSTOMER_IS_BLOCK AS CustomerIsBlock,
                     c.CUSTOMER_BLOCK_REASON AS CustomerBlockReason,
                     c.CUSTOMER_NOTE   AS CustomerNote,
-                    ISNULL(c.NotificationLang, 'ar') AS NotificationLang
+                    ISNULL(c.NotificationLang, 'ar') AS NotificationLang,
+                    ISNULL(c.HasRefundHistory, 0)    AS HasRefundHistory,
+                    c.LastRefundDate                  AS LastRefundDate,
+                    ISNULL(c.TotalRefundAmount, 0)   AS TotalRefundAmount
                 FROM dbo.CUSTOMER c
                 LEFT JOIN dbo.BRANCH b ON b.BRANCH_ID = c.BRANCH_ID
                 WHERE (@BranchId IS NULL OR c.BRANCH_ID = @BranchId)

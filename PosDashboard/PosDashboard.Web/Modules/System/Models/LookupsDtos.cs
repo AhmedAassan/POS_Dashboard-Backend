@@ -135,7 +135,10 @@ namespace PosDashboard.Web.Modules.System.Models
             int? CustomerIsBlock,
             string? CustomerBlockReason,
             string? CustomerNote,
-            string NotificationLang         
+            string NotificationLang,
+            bool HasRefundHistory,         
+            DateTime? LastRefundDate,     
+            decimal TotalRefundAmount      
         );
 
         // ===== Invoice Payment Types (branch scoped via branch info) =====

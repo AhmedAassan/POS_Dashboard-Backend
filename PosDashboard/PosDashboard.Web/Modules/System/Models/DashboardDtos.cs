@@ -1,4 +1,10 @@
-// File: Modules/System/Models/DashboardDtos.cs
+// Modules/System/Models/DashboardDtos.cs
+// UPDATED — adds RefundSummaryDto to DashboardSummaryDto,
+//           adds RefundType field to DashboardTransactionDto,
+//           and adds 'REFUND' to TransactionType.
+//
+// INSTRUCTIONS: Replace the existing DashboardDtos.cs entirely with this file.
+
 using System;
 using System.Collections.Generic;
 
@@ -36,6 +42,9 @@ namespace PosDashboard.Web.Modules.System.Models
             // 2G — Client Insights
             ClientInsightsDto ClientInsights,
 
+            // 2H — Refund Summary  ← NEW
+            RefundSummaryDto? RefundSummary,
+
             // Meta
             string Currency,
             int WorkdayMinutes,
@@ -50,31 +59,34 @@ namespace PosDashboard.Web.Modules.System.Models
         );
 
         public record DashboardTransactionDto(
-            string TransactionId,        // composite e.g. "CHK-1234", "DEP-77", "WAL-12", "PKG-9"
-            string TransactionType,      // CHECKOUT | DEPOSIT | WALLET_LOAD | PACKAGE_SALE
+            string TransactionId,
+            /// <summary>CHECKOUT | DEPOSIT | WALLET_LOAD | PACKAGE_SALE | REFUND</summary>
+            string TransactionType,
             string? InvoiceNumber,
             string CustomerName,
             string? StaffName,
             string? ServiceName,
             decimal Amount,
             string PaymentTypeName,
-            string Time,                 // HH:mm
-            string Status,                // completed | pending | cancelled
+            string Time,
+            string Status,
             List<TransactionPaymentBreakdownDto> PaymentBreakdown,
-            int? AppointmentId
+            int? AppointmentId,
+            /// <summary>Only populated for TransactionType='REFUND': 'CASH' | 'LINK' | 'WALLET'</summary>
+            string? RefundType  // ← NEW
         );
 
         public record StaffPerformanceDto(
             int StaffId,
             string StaffName,
-            string? StaffColor,          // null — frontend derives by hash(StaffId)
+            string? StaffColor,
             int AppointmentCount,
             int CompletedCount,
             int CancelledCount,
             int NoShowCount,
             int TotalWorkMinutes,
             decimal TotalRevenue,
-            decimal Utilization,         // %
+            decimal Utilization,
             List<StaffClientDto> Clients
         );
 
@@ -82,7 +94,7 @@ namespace PosDashboard.Web.Modules.System.Models
             string CustomerName,
             string ServiceName,
             decimal Amount,
-            string Time                  // HH:mm
+            string Time
         );
 
         public record AppointmentStatsDto(
@@ -118,9 +130,19 @@ namespace PosDashboard.Web.Modules.System.Models
             decimal TotalSpent,
             int VisitCount
         );
+
         public record TransactionPaymentBreakdownDto(
             string PaymentTypeName,
             decimal Amount
+        );
+
+        // ── NEW ──────────────────────────────────────────────────
+        public record RefundSummaryDto(
+            int TotalRefunds,
+            decimal TotalRefundAmount,
+            int CashRefunds,
+            int LinkRefunds,
+            int WalletRefunds
         );
     }
 }

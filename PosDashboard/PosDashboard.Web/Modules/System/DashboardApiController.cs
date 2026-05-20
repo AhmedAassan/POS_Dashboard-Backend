@@ -39,8 +39,8 @@ namespace PosDashboard.Web.Modules.System
 
                 if (!DateTime.TryParseExact(date, "yyyy-MM-dd",
                     CultureInfo.InvariantCulture, DateTimeStyles.None, out var dateOnly))
-                                return Ok(new ApiResult<DashboardSummaryDto>(false,
-                                    "date must be yyyy-MM-dd", null));
+                    return Ok(new ApiResult<DashboardSummaryDto>(false,
+                        "date must be yyyy-MM-dd", null));
 
                 using var conn = sqlConnections.NewByKey("Default");
 
@@ -61,7 +61,7 @@ namespace PosDashboard.Web.Modules.System
                 int workdayMinutes = Math.Max(1, (endHour - startHour) * 60);
                 int tzOffset = meta?.TzOffset != null ? (int)meta.TzOffset : 3;
 
-                
+
                 var dateStart = dateOnly.Date.AddHours(-tzOffset);
                 var dateEnd = dateStart.AddDays(1);
 
@@ -163,10 +163,30 @@ namespace PosDashboard.Web.Modules.System
                 decimal pendingDeposit = kpi != null ? (decimal)kpi.PendingFromDeposits : 0m;
                 decimal walletRev = kpi != null ? (decimal)kpi.WalletRevenue : 0m;
                 decimal packagesRev = kpi != null ? (decimal)kpi.PackagesRevenue : 0m;
-                decimal onlineFullRev = kpi != null ? (decimal)kpi.OnlineFullRevenue : 0m;  
+                decimal onlineFullRev = kpi != null ? (decimal)kpi.OnlineFullRevenue : 0m;
                 decimal totalEffective = kpi != null ? (decimal)kpi.TotalEffectiveRevenue : 0m;
 
-                // ---------- 2B: Payment Type Breakdown ----------
+                // ---------- 2H: Refund Summary ----------
+                var refundSummaryRow = SqlMapper.Query<dynamic>(conn, @"
+                                     SELECT COUNT(*) AS TotalRefunds,
+                                            ISNULL(SUM(RefundAmount), 0)                          AS TotalRefundAmount,
+                                            SUM(CASE WHEN RefundType = 'CASH'   THEN 1 ELSE 0 END) AS CashRefunds,
+                                            SUM(CASE WHEN RefundType = 'LINK'   THEN 1 ELSE 0 END) AS LinkRefunds,
+                                            SUM(CASE WHEN RefundType = 'WALLET' THEN 1 ELSE 0 END) AS WalletRefunds
+                                     FROM dbo.RefundTransactions
+                                     WHERE BranchId = @BranchId
+                                       AND CAST(ProcessedAt AS DATE) = @DateOnly
+                                       AND Deleted = 0",
+                    p).FirstOrDefault();
+
+                var refundSummary = refundSummaryRow != null
+                    ? new RefundSummaryDto(
+                        TotalRefunds: (int)(refundSummaryRow.TotalRefunds ?? 0),
+                        TotalRefundAmount: (decimal)(refundSummaryRow.TotalRefundAmount ?? 0m),
+                        CashRefunds: (int)(refundSummaryRow.CashRefunds ?? 0),
+                        LinkRefunds: (int)(refundSummaryRow.LinkRefunds ?? 0),
+                        WalletRefunds: (int)(refundSummaryRow.WalletRefunds ?? 0))
+                    : null;
                 // ---------- 2B: Payment Type Breakdown ----------
                 var paymentBreakdown = SqlMapper.Query<dynamic>(conn, @"
                     ;WITH AllPayments AS (
@@ -387,6 +407,28 @@ namespace PosDashboard.Web.Modules.System
                     WHERE c.BRANCH_ID = @BranchId
                       AND ISNULL(pp.Deleted, 0) = 0
                       AND pp.AddedDate >= @DateStart AND pp.AddedDate < @DateEnd
+
+                    UNION ALL
+
+                    SELECT
+                        'RFD-' + CAST(rt.Id AS varchar(20)),
+                        'REFUND',
+                        ai.InvoiceNumber,
+                        c.CUSTOMER_NAME,
+                        NULL,                    -- StaffName
+                        NULL,                    -- ServiceName
+                        -rt.RefundAmount,        -- negative amount
+                        rt.RefundType,           -- used as PaymentTypeName for REFUND rows
+                        NULL,                    -- PaymentBreakdownJson
+                        NULL,                    -- AppointmentId
+                        rt.ProcessedAt,
+                        'refunded'               -- Status
+                    FROM dbo.RefundTransactions rt
+                    INNER JOIN dbo.AppointmentInvoices ai ON ai.Id = rt.InvoiceId
+                    INNER JOIN dbo.CUSTOMER c ON c.CUSTOMER_ID = rt.CustomerId
+                    WHERE rt.BranchId = @BranchId
+                      AND rt.ProcessedAt >= @DateStart AND rt.ProcessedAt < @DateEnd
+                      AND rt.Deleted = 0
                 )
                 SELECT
                     TransactionId, TransactionType, InvoiceNumber, CustomerName,
@@ -430,7 +472,10 @@ namespace PosDashboard.Web.Modules.System
                             Time: (string)(r.Time ?? "00:00"),
                             Status: (string)r.Status,
                             PaymentBreakdown: breakdown,
-                            AppointmentId: r.AppointmentId != null ? (int?)r.AppointmentId : null
+                            AppointmentId: r.AppointmentId != null ? (int?)r.AppointmentId : null,
+                            RefundType: (string)r.TransactionType == "REFUND"
+                                      ? (string)r.PaymentTypeName   // for REFUND rows, PaymentTypeName carries RefundType
+                                      : null
                         );
                     }).ToList();
 
@@ -792,6 +837,7 @@ namespace PosDashboard.Web.Modules.System
                     AppointmentStats: apptStats,
                     ServiceCategories: categories,
                     ClientInsights: clientInsights,
+                    RefundSummary: refundSummary,
                     Currency: currency,
                     WorkdayMinutes: workdayMinutes,
                     GeneratedAt: DateTime.UtcNow
