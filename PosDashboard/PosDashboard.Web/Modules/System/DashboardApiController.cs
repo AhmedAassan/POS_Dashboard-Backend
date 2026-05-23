@@ -335,11 +335,15 @@ namespace PosDashboard.Web.Modules.System
                         ia.PaymentBreakdownJson   AS PaymentBreakdownJson,
                         ia.AppointmentId          AS AppointmentId,
                         ia.CreatedAt              AS TxAt,
-                        'completed'               AS Status
+                        'completed'               AS Status,
+                        ai.PackageOfferId,
+                        ai.PackageOfferName,
+                        ai.PackageOfferPrice
                     FROM InvAmounts ia
                     INNER JOIN dbo.AppointmentData a ON a.Id = ia.AppointmentId
                     INNER JOIN dbo.CUSTOMER c        ON c.CUSTOMER_ID = a.CustomerId
                     INNER JOIN dbo.STAFF s           ON s.Id = a.StaffId
+                    LEFT JOIN dbo.AppointmentInvoices ai ON ai.AppointmentId = ia.AppointmentId
                     WHERE ia.NonDepositNonWalletPaid > 0
 
                     UNION ALL
@@ -353,7 +357,10 @@ namespace PosDashboard.Web.Modules.System
                         NULL,
                         NULL,
                         ap.PaidAt,
-                        CASE WHEN a.CheckoutStatus = 'checked_out' THEN 'completed' ELSE 'pending' END
+                        CASE WHEN a.CheckoutStatus = 'checked_out' THEN 'completed' ELSE 'pending' END,
+                        CAST(NULL AS INT)            AS PackageOfferId,
+                        CAST(NULL AS NVARCHAR(255))  AS PackageOfferName,
+                        CAST(NULL AS DECIMAL(18,3))  AS PackageOfferPrice
                     FROM dbo.AppointmentPayments ap
                     INNER JOIN dbo.AppointmentData a ON a.Id = ap.AppointmentId
                     INNER JOIN dbo.CUSTOMER c        ON c.CUSTOMER_ID = a.CustomerId
@@ -377,7 +384,10 @@ namespace PosDashboard.Web.Modules.System
                         NULL,
                         NULL,
                         sp.PAYMENT_DATE,
-                        'completed'
+                        'completed',
+                        CAST(NULL AS INT)            AS PackageOfferId,
+                        CAST(NULL AS NVARCHAR(255))  AS PackageOfferName,
+                        CAST(NULL AS DECIMAL(18,3))  AS PackageOfferPrice
                     FROM dbo.SubscriptionPayment sp
                     INNER JOIN dbo.Subscriptions s ON s.Id = sp.SubscriptionId
                     INNER JOIN dbo.CUSTOMER c      ON c.CUSTOMER_REF_GUIDE = s.CustomerRef
@@ -398,7 +408,10 @@ namespace PosDashboard.Web.Modules.System
                         NULL,
                         NULL,
                         pp.AddedDate,
-                        'completed'
+                        'completed',
+                        CAST(NULL AS INT)            AS PackageOfferId,
+                        CAST(NULL AS NVARCHAR(255))  AS PackageOfferName,
+                        CAST(NULL AS DECIMAL(18,3))  AS PackageOfferPrice
                     FROM dbo.CustomerPackagePayments pp
                     INNER JOIN dbo.CustomerPackages cp  ON cp.Id = pp.CustomerPackageId
                     INNER JOIN dbo.Packages pkg         ON pkg.Id = cp.PackageId
@@ -422,7 +435,10 @@ namespace PosDashboard.Web.Modules.System
                         NULL,                    -- PaymentBreakdownJson
                         NULL,                    -- AppointmentId
                         rt.ProcessedAt,
-                        'refunded'               -- Status
+                        'refunded',               -- Status
+                        CAST(NULL AS INT)            AS PackageOfferId,
+                        CAST(NULL AS NVARCHAR(255))  AS PackageOfferName,
+                        CAST(NULL AS DECIMAL(18,3))  AS PackageOfferPrice
                     FROM dbo.RefundTransactions rt
                     INNER JOIN dbo.AppointmentInvoices ai ON ai.Id = rt.InvoiceId
                     INNER JOIN dbo.CUSTOMER c ON c.CUSTOMER_ID = rt.CustomerId
@@ -436,7 +452,10 @@ namespace PosDashboard.Web.Modules.System
                     PaymentBreakdownJson,
                     AppointmentId,
                     CONVERT(varchar(5), TxAt, 108) AS [Time],
-                    Status
+                    Status,
+                    PackageOfferId,
+                    PackageOfferName,
+                    PackageOfferPrice
                 FROM Tx
                 ORDER BY TxAt DESC;",
                     p)
@@ -475,7 +494,18 @@ namespace PosDashboard.Web.Modules.System
                             AppointmentId: r.AppointmentId != null ? (int?)r.AppointmentId : null,
                             RefundType: (string)r.TransactionType == "REFUND"
                                       ? (string)r.PaymentTypeName   // for REFUND rows, PaymentTypeName carries RefundType
-                                      : null
+                                      : null,
+                            PackageOfferId: r.PackageOfferId is DBNull || r.PackageOfferId == null
+                                ? (int?)null
+                                : (int?)Convert.ToInt32(r.PackageOfferId),
+
+                            PackageOfferName: r.PackageOfferName is DBNull || r.PackageOfferName == null
+                                ? (string?)null
+                                : (string?)r.PackageOfferName,
+
+                            PackageOfferPrice: r.PackageOfferPrice is DBNull || r.PackageOfferPrice == null
+                                ? (decimal?)null
+                                : (decimal?)Convert.ToDecimal(r.PackageOfferPrice)
                         );
                     }).ToList();
 
@@ -491,10 +521,13 @@ namespace PosDashboard.Web.Modules.System
                     SUM(CASE WHEN a.Status = 'cancelled' THEN 1 ELSE 0 END)                AS CancelledCount,
                     SUM(CASE WHEN a.Status = 'no-show'   THEN 1 ELSE 0 END)                AS NoShowCount,
                     ISNULL(SUM(
-                        CASE WHEN a.Status = 'completed' AND a.StartTime IS NOT NULL AND a.EndTime IS NOT NULL
-                             THEN DATEDIFF(MINUTE, a.StartTime, a.EndTime)
-                             ELSE 0
-                        END), 0)                                                            AS TotalWorkMinutes,
+                    CASE WHEN a.StartTime IS NOT NULL AND a.EndTime IS NOT NULL
+                              AND a.Status != 'cancelled'
+                         THEN DATEDIFF(MINUTE, 
+                              CAST(a.StartTime AS time), 
+                              CAST(a.EndTime AS time))
+                         ELSE 0
+                    END), 0)  AS TotalWorkMinutes,
                     ISNULL(SUM(
                         CASE WHEN a.CheckoutStatus = 'checked_out'
                              THEN a.DiscountedUnitPrice
@@ -570,11 +603,63 @@ namespace PosDashboard.Web.Modules.System
                     a.StaffId,
                     c.CUSTOMER_NAME                         AS CustomerName,
                     i.ITEM_NAME1                            AS ServiceName,
-                    a.DiscountedUnitPrice                   AS Amount,
+                    CASE
+                        -- OFFER package: حساب النصيب النسبي
+                        WHEN ai.PackageOfferId IS NOT NULL
+                             AND ai.PackageOfferPrice IS NOT NULL
+                             AND ai.PackageOfferPrice > 0
+                             AND pkgTotal.OriginalTotal > 0
+                        THEN ROUND(
+                            (iu.ITEM_UNIT_PRICE / pkgTotal.OriginalTotal) * ai.PackageOfferPrice,
+                            3)
+                        WHEN a.DiscountedUnitPrice = 0
+                             AND EXISTS (
+                                 SELECT 1 FROM dbo.CustomerPackageSessions cps2
+                                 WHERE cps2.AppointmentId = a.Id
+                                   AND ISNULL(cps2.Deleted, 0) = 0
+                             )
+                        THEN ISNULL((
+                            SELECT TOP 1 cps3.ItemPriceInPackage
+                            FROM dbo.CustomerPackageSessions cps3
+                            WHERE cps3.AppointmentId = a.Id
+                              AND ISNULL(cps3.Deleted, 0) = 0
+                            ORDER BY cps3.Id
+                        ), iu.ITEM_UNIT_PRICE)
+                        ELSE a.DiscountedUnitPrice
+                    END AS Amount,
                     CONVERT(varchar(5), a.StartTime, 108)   AS [Time]
                 FROM dbo.AppointmentData a
                 INNER JOIN dbo.CUSTOMER c ON c.CUSTOMER_ID = a.CustomerId
                 INNER JOIN dbo.ITEM     i ON i.ITEM_ID     = a.ItemId
+                INNER JOIN dbo.ITEM_UNIT iu ON iu.ITEM_ID = a.ItemId AND iu.UNIT_ID = a.UnitId
+                -- ربط الـ invoice للـ OFFER
+                OUTER APPLY (
+                    SELECT TOP 1 inv.PackageOfferId, inv.PackageOfferPrice
+                    FROM dbo.AppointmentInvoices inv
+                    WHERE inv.AppointmentId = a.Id
+                       OR inv.Id IN (
+                           SELECT ail.InvoiceId FROM dbo.AppointmentInvoiceLines ail
+                           WHERE ail.AppointmentId = a.Id
+                       )
+                    ORDER BY inv.Id DESC
+                ) ai
+                -- مجموع الأسعار الأصلية لكل services في نفس الـ invoice
+                OUTER APPLY (
+                    SELECT ISNULL(SUM(iu2.ITEM_UNIT_PRICE), 0) AS OriginalTotal
+                    FROM dbo.AppointmentInvoiceLines ail2
+                    INNER JOIN dbo.AppointmentData a2 ON a2.Id = ail2.AppointmentId
+                    INNER JOIN dbo.ITEM_UNIT iu2 ON iu2.ITEM_ID = a2.ItemId AND iu2.UNIT_ID = a2.UnitId
+                    WHERE ail2.InvoiceId = (
+                        SELECT TOP 1 inv2.Id
+                        FROM dbo.AppointmentInvoices inv2
+                        WHERE inv2.AppointmentId = a.Id
+                           OR inv2.Id IN (
+                               SELECT ail3.InvoiceId FROM dbo.AppointmentInvoiceLines ail3
+                               WHERE ail3.AppointmentId = a.Id
+                           )
+                        ORDER BY inv2.Id DESC
+                    )
+                ) pkgTotal
                 WHERE a.BranchId        = @BranchId
                   AND a.AppointmentDate  = @DateOnly
                   AND (@StaffId IS NULL OR a.StaffId = @StaffId)
@@ -603,7 +688,11 @@ namespace PosDashboard.Web.Modules.System
                     cps.StaffId,
                     c.CUSTOMER_NAME                         AS CustomerName,
                     i.ITEM_NAME1                            AS ServiceName,
-                    cps.ItemPriceInPackage                  AS Amount,
+                    CASE
+                        WHEN ISNULL(cps.ItemPriceInPackage, 0) > 0
+                        THEN cps.ItemPriceInPackage
+                        ELSE iu.ITEM_UNIT_PRICE
+                    END AS Amount,
                     NULL                                    AS [Time]
                 FROM dbo.CustomerPackageSessions cps
                 INNER JOIN dbo.CustomerPackages  cp  ON cp.Id               = cps.CustomerPackageId
@@ -643,6 +732,10 @@ namespace PosDashboard.Web.Modules.System
                         : 0m;
                     if (util > 100m) util = 100m;
 
+                    var staffClients = clientsByStaff.TryGetValue(sId, out var csVal)
+                    ? csVal
+                    : new List<StaffClientDto>();
+
                     return new StaffPerformanceDto(
                         StaffId: sId,
                         StaffName: (string)(r.StaffName ?? ""),
@@ -652,9 +745,11 @@ namespace PosDashboard.Web.Modules.System
                         CancelledCount: (int)r.CancelledCount,
                         NoShowCount: (int)r.NoShowCount,
                         TotalWorkMinutes: totalWork,
-                        TotalRevenue: (decimal)r.TotalRevenue,
+                        TotalRevenue: staffClients.Count > 0
+                            ? staffClients.Sum(c => c.Amount)
+                            : (decimal)r.TotalRevenue,
                         Utilization: util,
-                        Clients: clientsByStaff.TryGetValue(sId, out var cs) ? cs : new List<StaffClientDto>()
+                        Clients: staffClients
                     );
                 }).ToList();
 

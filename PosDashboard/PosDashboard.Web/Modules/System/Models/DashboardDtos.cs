@@ -73,7 +73,10 @@ namespace PosDashboard.Web.Modules.System.Models
             List<TransactionPaymentBreakdownDto> PaymentBreakdown,
             int? AppointmentId,
             /// <summary>Only populated for TransactionType='REFUND': 'CASH' | 'LINK' | 'WALLET'</summary>
-            string? RefundType  // ← NEW
+            string? RefundType,
+            int? PackageOfferId,
+            string? PackageOfferName,
+            decimal? PackageOfferPrice
         );
 
         public record StaffPerformanceDto(

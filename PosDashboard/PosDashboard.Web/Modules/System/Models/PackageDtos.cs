@@ -29,6 +29,7 @@ namespace PosDashboard.Web.Modules.System.Models
             decimal Amount,
             int NoOfDays,
             bool Active,
+            bool Offer,
             int TotalSessions,
             decimal TotalRealValue,
             decimal Savings,
@@ -46,6 +47,7 @@ namespace PosDashboard.Web.Modules.System.Models
             decimal Amount,
             int NoOfDays,
             bool Active,
+            bool Offer,
             List<PackageItemDefInput> Items
         );
 
@@ -55,6 +57,7 @@ namespace PosDashboard.Web.Modules.System.Models
             decimal? Amount,
             int? NoOfDays,
             bool? Active,
+            bool? Offer,
             List<PackageItemDefInput>? Items
         );
 
@@ -146,7 +149,8 @@ namespace PosDashboard.Web.Modules.System.Models
             int ItemId,          // ← NEW
             int UnitId,          // ← NEW
             string ItemEnName,   // ← NEW
-            string ItemArName    // ← NEW
+            string ItemArName,    // ← NEW
+            bool IsOffer
         );
 
         public record PagedResult<T>(

@@ -230,7 +230,9 @@ namespace PosDashboard.Web.Modules.System.Models
             string PaymentStatus,
             DateTime CreatedAt,
             List<InvoiceLineItemDto> LineItems,
-            List<AppointmentPaymentDetailDto> Payments
+            List<AppointmentPaymentDetailDto> Payments,
+            string? PackageOfferName,    
+            decimal? PackageOfferPrice
         );
 
         /*split payment history*/

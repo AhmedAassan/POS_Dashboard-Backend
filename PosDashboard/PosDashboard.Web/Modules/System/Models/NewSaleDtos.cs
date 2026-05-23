@@ -45,7 +45,9 @@ namespace PosDashboard.Web.Modules.System.Models
             string? Notes,
             List<NewSaleLineRequest> Lines,
             NewSalePaymentsRequest? Payments,
-            bool SendWhatsApp
+            bool SendWhatsApp,
+            int? PackageOfferId,      // ← Add this (nullable — null = normal sale)
+            string? PackageOfferName  // ← Add this to the invoice
         );
 
         // ===== Response =====
@@ -71,7 +73,10 @@ namespace PosDashboard.Web.Modules.System.Models
             string Currency,
             bool WhatsAppSent,
             string? WhatsAppError,
-            List<NewSaleLineWarning> Warnings
+            List<NewSaleLineWarning> Warnings,
+            int? PackageOfferId,      
+            string? PackageOfferName, 
+            decimal? PackageOfferPrice
         );
     }
 }

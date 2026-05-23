@@ -1029,20 +1029,14 @@ namespace PosDashboard.Web.Modules.System
             // 1) Legacy / normal checkout path:
             //    invoice is directly attached to this appointment.
             var invoice = SqlMapper.Query(conn, @"
-        SELECT TOP 1
-            inv.Id,
-            inv.InvoiceNumber,
-            inv.AppointmentId,
-            inv.TotalAmount,
-            inv.PaidAmount,
-            inv.RemainingAmount,
-            inv.Currency,
-            inv.PaymentTypeId,
-            inv.PaymentStatus,
-            inv.CreatedAt
-        FROM dbo.AppointmentInvoices inv
-        WHERE inv.AppointmentId = @Id
-        ORDER BY inv.Id DESC",
+            SELECT TOP 1
+                inv.Id, inv.InvoiceNumber, inv.AppointmentId,
+                inv.TotalAmount, inv.PaidAmount, inv.RemainingAmount,
+                inv.Currency, inv.PaymentTypeId, inv.PaymentStatus, inv.CreatedAt,
+                inv.PackageOfferName, inv.PackageOfferPrice
+            FROM dbo.AppointmentInvoices inv
+            WHERE inv.AppointmentId = @Id
+            ORDER BY inv.Id DESC",
                 new { Id = id }).FirstOrDefault();
 
             // 2) New Sale path:
@@ -1051,22 +1045,15 @@ namespace PosDashboard.Web.Modules.System
             if (invoice == null)
             {
                 invoice = SqlMapper.Query(conn, @"
-            SELECT TOP 1
-                inv.Id,
-                inv.InvoiceNumber,
-                inv.AppointmentId,
-                inv.TotalAmount,
-                inv.PaidAmount,
-                inv.RemainingAmount,
-                inv.Currency,
-                inv.PaymentTypeId,
-                inv.PaymentStatus,
-                inv.CreatedAt
-            FROM dbo.AppointmentInvoiceLines ail
-            INNER JOIN dbo.AppointmentInvoices inv
-                ON inv.Id = ail.InvoiceId
-            WHERE ail.AppointmentId = @Id
-            ORDER BY ail.Id",
+                SELECT TOP 1
+                    inv.Id, inv.InvoiceNumber, inv.AppointmentId,
+                    inv.TotalAmount, inv.PaidAmount, inv.RemainingAmount,
+                    inv.Currency, inv.PaymentTypeId, inv.PaymentStatus, inv.CreatedAt,
+                    inv.PackageOfferName, inv.PackageOfferPrice
+                FROM dbo.AppointmentInvoiceLines ail
+                INNER JOIN dbo.AppointmentInvoices inv ON inv.Id = ail.InvoiceId
+                WHERE ail.AppointmentId = @Id
+                ORDER BY ail.Id",
                     new { Id = id }).FirstOrDefault();
             }
 
@@ -1226,7 +1213,11 @@ namespace PosDashboard.Web.Modules.System
                 PaymentStatus: (string)invoice.PaymentStatus,
                 CreatedAt: (DateTime)invoice.CreatedAt,
                 LineItems: lineItems,
-                Payments: invoicePayments   
+                Payments: invoicePayments,
+                PackageOfferName: invoice.PackageOfferName is DBNull || invoice.PackageOfferName == null
+                    ? null : (string?)invoice.PackageOfferName,
+                PackageOfferPrice: invoice.PackageOfferPrice is DBNull || invoice.PackageOfferPrice == null
+                    ? null : (decimal?)invoice.PackageOfferPrice
             );
 
             return Ok(new ApiResult<DetailedInvoiceDto>(true, null, dto));

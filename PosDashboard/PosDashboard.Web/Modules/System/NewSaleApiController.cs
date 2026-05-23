@@ -272,7 +272,29 @@ namespace PosDashboard.Web.Modules.System
                 }
 
                 // -------- Validate payments --------
-                decimal grandTotal = resolvedLines.Sum(x => x.SalePrice);
+                decimal grandTotal;
+                int? packageOfferId = request.PackageOfferId;
+                string? packageOfferName = null;
+                decimal? packageOfferPrice = null;
+
+                if (packageOfferId.HasValue)
+                {
+                    var pkg = SqlMapper.Query(conn, @"
+                    SELECT Id, EnglishName, ArabicName, Amount 
+                    FROM dbo.Packages 
+                    WHERE Id = @Id AND ISNULL(OFFER,0) = 1 AND ISNULL(Deleted,0) = 0",
+                        new { Id = packageOfferId.Value }).FirstOrDefault();
+
+                    if (pkg == null) return Fail("Package OFFER not found");
+
+                    packageOfferName = (string)(pkg.EnglishName ?? "");
+                    packageOfferPrice = (decimal)pkg.Amount;
+                    grandTotal = packageOfferPrice.Value; // Price from the package
+                }
+                else
+                {
+                    grandTotal = resolvedLines.Sum(x => x.SalePrice); // Regular price
+                }
 
                 decimal walletAmount = 0m;
                 int? walletSubId = null;
@@ -437,13 +459,15 @@ namespace PosDashboard.Web.Modules.System
                         INSERT INTO dbo.AppointmentInvoices (
                             InvoiceNumber, AppointmentId, BranchId, CustomerId,
                             TotalAmount, PaidAmount, RemainingAmount, Currency,
-                            PaymentTypeId, PaymentStatus, CreatedAt
+                            PaymentTypeId, PaymentStatus, CreatedAt,
+                            PackageOfferId, PackageOfferName, PackageOfferPrice
                         )
                         OUTPUT INSERTED.Id
                         VALUES (
                             @InvoiceNumber, @AppointmentId, @BranchId, @CustomerId,
                             @TotalAmount, @PaidAmount, @RemainingAmount, @Currency,
-                            @PaymentTypeId, @PaymentStatus, SYSUTCDATETIME()
+                            @PaymentTypeId, @PaymentStatus, SYSUTCDATETIME(),
+                            @PackageOfferId, @PackageOfferName, @PackageOfferPrice
                         )",
                         new
                         {
@@ -456,7 +480,10 @@ namespace PosDashboard.Web.Modules.System
                             RemainingAmount = 0m,
                             Currency = currency,
                             PaymentTypeId = invoicePaymentTypeId,
-                            PaymentStatus = paymentStatus
+                            PaymentStatus = paymentStatus,
+                            PackageOfferId = packageOfferId,
+                            PackageOfferName = packageOfferName,
+                            PackageOfferPrice = packageOfferPrice
                         }).First();
 
                     // 3) Invoice lines
@@ -610,7 +637,10 @@ namespace PosDashboard.Web.Modules.System
                         Currency: currency,
                         WhatsAppSent: waSent,
                         WhatsAppError: waErr,
-                        Warnings: warnings);
+                        Warnings: warnings,
+                        PackageOfferId: packageOfferId,
+                        PackageOfferName: packageOfferName,
+                        PackageOfferPrice: packageOfferPrice);
 
                     return Ok(new NewSaleDtos.ApiResult<NewSaleDtos.NewSaleResponse>(
                         true, null, response));

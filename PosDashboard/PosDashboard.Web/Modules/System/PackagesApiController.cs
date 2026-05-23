@@ -47,6 +47,7 @@ namespace PosDashboard.Web.Modules.System
                     ISNULL(p.Amount, 0) AS Amount,
                     ISNULL(p.NoOfDays, 0) AS NoOfDays,
                     CAST(ISNULL(p.Active, 0) AS bit) AS Active,
+                    CAST(ISNULL(p.OFFER, 0) AS bit) AS Offer,
                     ISNULL(p.AddedDate, SYSUTCDATETIME()) AS AddedDate
                 FROM dbo.Packages p
                 WHERE ISNULL(p.Deleted, 0) = 0
@@ -71,6 +72,7 @@ namespace PosDashboard.Web.Modules.System
                     Amount: amount,
                     NoOfDays: (int)p.NoOfDays,
                     Active: (bool)p.Active,
+                    Offer: (bool)p.Offer,
                     TotalSessions: totalSessions,
                     TotalRealValue: totalReal,
                     Savings: Math.Max(0, totalReal - amount),
@@ -96,6 +98,7 @@ namespace PosDashboard.Web.Modules.System
                     ISNULL(p.Amount, 0) AS Amount,
                     ISNULL(p.NoOfDays, 0) AS NoOfDays,
                     CAST(ISNULL(p.Active, 0) AS bit) AS Active,
+                    CAST(ISNULL(p.OFFER, 0) AS bit) AS Offer,
                     ISNULL(p.AddedDate, SYSUTCDATETIME()) AS AddedDate
                 FROM dbo.Packages p
                 WHERE p.Id = @Id AND ISNULL(p.Deleted, 0) = 0",
@@ -117,6 +120,7 @@ namespace PosDashboard.Web.Modules.System
                 Amount: amount,
                 NoOfDays: (int)p.NoOfDays,
                 Active: (bool)p.Active,
+                Offer: (bool)p.Offer,
                 TotalSessions: totalSessions,
                 TotalRealValue: totalReal,
                 Savings: Math.Max(0, totalReal - amount),
@@ -177,7 +181,7 @@ namespace PosDashboard.Web.Modules.System
                 VALUES (
                     @BranchId, @EnglishName, @ArabicName, @Amount,
                     @Active, 0, @NoOfDays,
-                    0, 0, 0,
+                    0, @Offer, 0,
                     @AddedBy, @AddedDate
                 )",
                 new
@@ -187,6 +191,7 @@ namespace PosDashboard.Web.Modules.System
                     request.ArabicName,
                     request.Amount,
                     Active = request.Active,
+                    Offer = request.Offer,
                     request.NoOfDays,
                     AddedBy = userId,
                     AddedDate = now
@@ -269,7 +274,11 @@ namespace PosDashboard.Web.Modules.System
                 updates.Add("Active = @Active");
                 parameters.Add("Active", request.Active.Value);
             }
-
+            if (request.Offer.HasValue)
+            {
+                updates.Add("OFFER = @Offer");
+                parameters.Add("Offer", request.Offer.Value ? 1 : 0);
+            }
             if (updates.Count > 0)
             {
                 updates.Add("ModifiedBy = @ModifiedBy");
@@ -766,6 +775,7 @@ namespace PosDashboard.Web.Modules.System
                     iu.UNIT_ID    AS UnitId,
                     i.ITEM_NAME1  AS ItemEnName,
                     i.ITEM_NAME2  AS ItemArName,
+                    CAST(ISNULL(p.OFFER, 0) AS bit) AS IsOffer,
                     ISNULL((
                         SELECT COUNT(*) 
                         FROM dbo.CustomerPackageSessions s2
@@ -804,7 +814,8 @@ namespace PosDashboard.Web.Modules.System
                 ItemId: (int)s.ItemId,
                 UnitId: (int)s.UnitId,
                 ItemEnName: (string)(s.ItemEnName ?? ""),
-                ItemArName: (string)(s.ItemArName ?? "")
+                ItemArName: (string)(s.ItemArName ?? ""),
+                IsOffer: (bool)s.IsOffer
             )).ToList();
 
             return Ok(new ApiResult<List<EligiblePackageSessionDto>>(true, null, result));

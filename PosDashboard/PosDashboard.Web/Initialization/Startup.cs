@@ -174,7 +174,7 @@ namespace PosDashboard
                         .WithOrigins("http://localhost:4200", "https://shopics.net:290",
                                      "https://shopics.net:291", "https://shopics.net:292", 
                                      "https://shopics.net:293", "https://shopics.net:294",
-                                     "https://shopics.net:295",
+                                     "https://shopics.net:295", "https://shopics.net:296",
                                      "https://shopics.net:289")
                         .AllowAnyHeader()
                         .AllowAnyMethod();
