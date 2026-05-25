@@ -87,7 +87,8 @@ namespace PosDashboard.Web.Modules.System
                           AND inv.CreatedAt >= @DateStart AND inv.CreatedAt < @DateEnd
                           AND ap.IsWalletPayment = 0
                           AND ap.PaymentAs = 'FULL'
-                          AND ISNULL(pt.OnlinePayment, 0) = 0   
+                          AND ISNULL(pt.OnlinePayment, 0) = 0
+                          AND ISNULL(inv.IsVoid, 0) = 0
                           AND (@StaffId IS NULL OR a.StaffId = @StaffId)
                     ),
                     DepositsToday AS (
@@ -138,8 +139,18 @@ namespace PosDashboard.Web.Modules.System
                           AND inv.CreatedAt >= @DateStart AND inv.CreatedAt < @DateEnd
                           AND ap.IsWalletPayment = 0
                           AND ap.PaymentAs = 'FULL'
-                          AND ISNULL(pt.OnlinePayment, 0) = 1   
+                          AND ISNULL(pt.OnlinePayment, 0) = 1
+                          AND ISNULL(inv.IsVoid, 0) = 0
                           AND (@StaffId IS NULL OR a.StaffId = @StaffId)
+                    ),
+                    -- Deduct cash refunds processed today from checkout revenue
+                    CashRefundsToday AS (
+                        SELECT ISNULL(SUM(rt.RefundAmount), 0) AS TotalCashRefunded
+                        FROM dbo.RefundTransactions rt
+                        WHERE rt.BranchId  = @BranchId
+                          AND rt.RefundType = 'CASH'
+                          AND rt.ProcessedAt >= @DateStart AND rt.ProcessedAt < @DateEnd
+                          AND rt.Deleted = 0
                     )
                     SELECT
                         c.TotalInvoicePaid        AS TotalCheckoutRevenue,
@@ -147,18 +158,22 @@ namespace PosDashboard.Web.Modules.System
                         p.PendingFromDeposits,
                         wal.WalletRevenue,
                         pk.PackagesRevenue,
-                        onl.OnlineFullRevenue,   
-                        (c.TotalInvoicePaid + d.TodayDepositRevenue + wal.WalletRevenue 
-                         + pk.PackagesRevenue + onl.OnlineFullRevenue) AS TotalEffectiveRevenue 
+                        onl.OnlineFullRevenue,
+                        cr.TotalCashRefunded,
+                        -- Checkout revenue net of cash refunds (can go negative — by design)
+                        (c.TotalInvoicePaid - cr.TotalCashRefunded) AS NetCheckoutRevenue,
+                        ((c.TotalInvoicePaid - cr.TotalCashRefunded) + d.TodayDepositRevenue
+                         + wal.WalletRevenue + pk.PackagesRevenue + onl.OnlineFullRevenue) AS TotalEffectiveRevenue 
                     FROM CheckoutToday c
                     CROSS JOIN DepositsToday d
                     CROSS JOIN PendingDeposits p
                     CROSS JOIN WalletToday wal
                     CROSS JOIN PackagesToday pk
-                    CROSS JOIN OnlineFullToday onl;",
+                    CROSS JOIN OnlineFullToday onl
+                    CROSS JOIN CashRefundsToday cr;",
                         p).FirstOrDefault();
 
-                decimal totalCheckout = kpi != null ? (decimal)kpi.TotalCheckoutRevenue : 0m;
+                decimal totalCheckout = kpi != null ? (decimal)kpi.NetCheckoutRevenue : 0m;
                 decimal todayDeposit = kpi != null ? (decimal)kpi.TodayDepositRevenue : 0m;
                 decimal pendingDeposit = kpi != null ? (decimal)kpi.PendingFromDeposits : 0m;
                 decimal walletRev = kpi != null ? (decimal)kpi.WalletRevenue : 0m;
@@ -193,9 +208,11 @@ namespace PosDashboard.Web.Modules.System
                         SELECT ap.PaymentTypeId, ap.Amount
                         FROM dbo.AppointmentPayments ap
                         INNER JOIN dbo.AppointmentData a ON a.Id = ap.AppointmentId
+                        LEFT JOIN dbo.AppointmentInvoices inv ON inv.AppointmentId = a.Id
                         WHERE a.BranchId = @BranchId
                           AND ap.PaidAt >= @DateStart AND ap.PaidAt < @DateEnd
-                          AND ap.IsWalletPayment = 0    -- ← استبعد الـ Wallet payments
+                          AND ap.IsWalletPayment = 0
+                          AND ISNULL(inv.IsVoid, 0) = 0
                           AND (@StaffId IS NULL OR a.StaffId = @StaffId)
                         UNION ALL
                         SELECT sp.PAYMENT_TYPE_ID, sp.PAYMENT_AMOUNT
@@ -213,17 +230,38 @@ namespace PosDashboard.Web.Modules.System
                         WHERE c.BRANCH_ID = @BranchId
                           AND ISNULL(pp.Deleted, 0) = 0
                           AND pp.AddedDate >= @DateStart AND pp.AddedDate < @DateEnd
+                    ),
+                    -- Cash refunds processed today — subtract from whichever payment type is 'Cash'
+                    CashRefundsByType AS (
+                        SELECT
+                            pt.INVOICE_PAYMENT_TYPE_ID AS PaymentTypeId,
+                            -ISNULL(SUM(rt.RefundAmount), 0) AS Amount
+                        FROM dbo.RefundTransactions rt
+                        -- Map CASH refunds to the cash payment type row
+                        INNER JOIN dbo.INVOICE_PAYMENT_TYPE pt
+                            ON UPPER(pt.INVOICE_PAYMENT_TYPE_NAME1) LIKE '%CASH%'
+                            OR UPPER(pt.DocumentName) LIKE '%CASH%'
+                        WHERE rt.BranchId   = @BranchId
+                          AND rt.RefundType  = 'CASH'
+                          AND rt.ProcessedAt >= @DateStart AND rt.ProcessedAt < @DateEnd
+                          AND rt.Deleted = 0
+                        GROUP BY pt.INVOICE_PAYMENT_TYPE_ID
+                    ),
+                    Combined AS (
+                        SELECT PaymentTypeId, Amount FROM AllPayments
+                        UNION ALL
+                        SELECT PaymentTypeId, Amount FROM CashRefundsByType
                     )
                     SELECT
                         pt.INVOICE_PAYMENT_TYPE_ID    AS PaymentTypeId,
                         pt.INVOICE_PAYMENT_TYPE_NAME1 AS PaymentTypeName,
                         pt.DocumentName               AS DocumentName,
                         SUM(ap.Amount)                AS Amount
-                    FROM AllPayments ap
+                    FROM Combined ap
                     INNER JOIN dbo.INVOICE_PAYMENT_TYPE pt
                         ON pt.INVOICE_PAYMENT_TYPE_ID = ap.PaymentTypeId
                     GROUP BY pt.INVOICE_PAYMENT_TYPE_ID, pt.INVOICE_PAYMENT_TYPE_NAME1, pt.DocumentName
-                    HAVING SUM(ap.Amount) > 0
+                    HAVING SUM(ap.Amount) <> 0   -- include negative balances (refund > income)
                     ORDER BY SUM(ap.Amount) DESC;",
                     p)
                     .Select(r => new PaymentTypeBreakdownDto(
@@ -338,7 +376,9 @@ namespace PosDashboard.Web.Modules.System
                         'completed'               AS Status,
                         ai.PackageOfferId,
                         ai.PackageOfferName,
-                        ai.PackageOfferPrice
+                        ai.PackageOfferPrice,
+                        ISNULL(ai.IsFullyRefunded, 0) AS IsFullyRefunded,
+                        ISNULL(ai.IsVoid, 0)          AS IsVoid
                     FROM InvAmounts ia
                     INNER JOIN dbo.AppointmentData a ON a.Id = ia.AppointmentId
                     INNER JOIN dbo.CUSTOMER c        ON c.CUSTOMER_ID = a.CustomerId
@@ -360,7 +400,9 @@ namespace PosDashboard.Web.Modules.System
                         CASE WHEN a.CheckoutStatus = 'checked_out' THEN 'completed' ELSE 'pending' END,
                         CAST(NULL AS INT)            AS PackageOfferId,
                         CAST(NULL AS NVARCHAR(255))  AS PackageOfferName,
-                        CAST(NULL AS DECIMAL(18,3))  AS PackageOfferPrice
+                        CAST(NULL AS DECIMAL(18,3))  AS PackageOfferPrice,
+                        CAST(0 AS BIT)              AS IsFullyRefunded,
+                        CAST(0 AS BIT)              AS IsVoid
                     FROM dbo.AppointmentPayments ap
                     INNER JOIN dbo.AppointmentData a ON a.Id = ap.AppointmentId
                     INNER JOIN dbo.CUSTOMER c        ON c.CUSTOMER_ID = a.CustomerId
@@ -387,7 +429,9 @@ namespace PosDashboard.Web.Modules.System
                         'completed',
                         CAST(NULL AS INT)            AS PackageOfferId,
                         CAST(NULL AS NVARCHAR(255))  AS PackageOfferName,
-                        CAST(NULL AS DECIMAL(18,3))  AS PackageOfferPrice
+                        CAST(NULL AS DECIMAL(18,3))  AS PackageOfferPrice,
+                        CAST(0 AS BIT)              AS IsFullyRefunded,
+                        CAST(0 AS BIT)              AS IsVoid
                     FROM dbo.SubscriptionPayment sp
                     INNER JOIN dbo.Subscriptions s ON s.Id = sp.SubscriptionId
                     INNER JOIN dbo.CUSTOMER c      ON c.CUSTOMER_REF_GUIDE = s.CustomerRef
@@ -411,7 +455,9 @@ namespace PosDashboard.Web.Modules.System
                         'completed',
                         CAST(NULL AS INT)            AS PackageOfferId,
                         CAST(NULL AS NVARCHAR(255))  AS PackageOfferName,
-                        CAST(NULL AS DECIMAL(18,3))  AS PackageOfferPrice
+                        CAST(NULL AS DECIMAL(18,3))  AS PackageOfferPrice,
+                        CAST(0 AS BIT)              AS IsFullyRefunded,
+                        CAST(0 AS BIT)              AS IsVoid
                     FROM dbo.CustomerPackagePayments pp
                     INNER JOIN dbo.CustomerPackages cp  ON cp.Id = pp.CustomerPackageId
                     INNER JOIN dbo.Packages pkg         ON pkg.Id = cp.PackageId
@@ -438,7 +484,9 @@ namespace PosDashboard.Web.Modules.System
                         'refunded',               -- Status
                         CAST(NULL AS INT)            AS PackageOfferId,
                         CAST(NULL AS NVARCHAR(255))  AS PackageOfferName,
-                        CAST(NULL AS DECIMAL(18,3))  AS PackageOfferPrice
+                        CAST(NULL AS DECIMAL(18,3))  AS PackageOfferPrice,
+                        CAST(0 AS BIT)              AS IsFullyRefunded,
+                        CAST(0 AS BIT)              AS IsVoid
                     FROM dbo.RefundTransactions rt
                     INNER JOIN dbo.AppointmentInvoices ai ON ai.Id = rt.InvoiceId
                     INNER JOIN dbo.CUSTOMER c ON c.CUSTOMER_ID = rt.CustomerId
@@ -455,7 +503,9 @@ namespace PosDashboard.Web.Modules.System
                     Status,
                     PackageOfferId,
                     PackageOfferName,
-                    PackageOfferPrice
+                    PackageOfferPrice,
+                    IsFullyRefunded,
+                    IsVoid
                 FROM Tx
                 ORDER BY TxAt DESC;",
                     p)
@@ -505,7 +555,9 @@ namespace PosDashboard.Web.Modules.System
 
                             PackageOfferPrice: r.PackageOfferPrice is DBNull || r.PackageOfferPrice == null
                                 ? (decimal?)null
-                                : (decimal?)Convert.ToDecimal(r.PackageOfferPrice)
+                                : (decimal?)Convert.ToDecimal(r.PackageOfferPrice),
+                            IsFullyRefunded: r.IsFullyRefunded != null && (bool)r.IsFullyRefunded,
+                            IsVoid: r.IsVoid != null && (bool)r.IsVoid
                         );
                     }).ToList();
 
@@ -535,18 +587,36 @@ namespace PosDashboard.Web.Modules.System
                         END), 0)                                                            AS TotalRevenue
                 FROM dbo.STAFF s
                 INNER JOIN (
-                    -- الـ appointments الأصلية
+                    -- الـ appointments الأصلية (excluding fully-refunded lines)
                     SELECT
-                        Id,
-                        StaffId,
-                        BranchId,
-                        AppointmentDate,
-                        Status,
-                        CheckoutStatus,
-                        StartTime,
-                        EndTime,
-                        DiscountedUnitPrice
-                    FROM dbo.AppointmentData
+                        a.Id,
+                        a.StaffId,
+                        a.BranchId,
+                        a.AppointmentDate,
+                        a.Status,
+                        a.CheckoutStatus,
+                        a.StartTime,
+                        a.EndTime,
+                        -- Use the line's DiscountedUnitPrice if available (reflects refund reductions),
+                        -- else use the appointment's own value
+                        ISNULL((
+                            SELECT TOP 1 ail.DiscountedUnitPrice
+                            FROM dbo.AppointmentInvoiceLines ail
+                            WHERE ail.AppointmentId = a.Id
+                              AND ISNULL(ail.IsRefunded, 0) = 0
+                            ORDER BY ail.Id
+                        ), a.DiscountedUnitPrice) AS DiscountedUnitPrice
+                    FROM dbo.AppointmentData a
+                    WHERE NOT EXISTS (
+                        -- Exclude appointment if ALL its invoice lines are refunded
+                        SELECT 1 FROM dbo.AppointmentInvoiceLines ail2
+                        WHERE ail2.AppointmentId = a.Id
+                    ) OR EXISTS (
+                        -- Include only if at least one non-refunded line remains
+                        SELECT 1 FROM dbo.AppointmentInvoiceLines ail3
+                        WHERE ail3.AppointmentId = a.Id
+                          AND ISNULL(ail3.IsRefunded, 0) = 0
+                    )
 
                     UNION ALL
 
@@ -563,6 +633,7 @@ namespace PosDashboard.Web.Modules.System
                         aci.DiscountedUnitPrice
                     FROM dbo.AppointmentCheckoutItems aci
                     INNER JOIN dbo.AppointmentData a ON a.Id = aci.AppointmentId
+                    WHERE ISNULL(aci.IsRefunded, 0) = 0
 
                     UNION ALL
 
@@ -663,6 +734,18 @@ namespace PosDashboard.Web.Modules.System
                 WHERE a.BranchId        = @BranchId
                   AND a.AppointmentDate  = @DateOnly
                   AND (@StaffId IS NULL OR a.StaffId = @StaffId)
+                  -- Exclude appointment if it has invoice lines and ALL of them are refunded
+                  AND (
+                      NOT EXISTS (
+                          SELECT 1 FROM dbo.AppointmentInvoiceLines ail_chk
+                          WHERE ail_chk.AppointmentId = a.Id
+                      )
+                      OR EXISTS (
+                          SELECT 1 FROM dbo.AppointmentInvoiceLines ail_chk2
+                          WHERE ail_chk2.AppointmentId = a.Id
+                            AND ISNULL(ail_chk2.IsRefunded, 0) = 0
+                      )
+                  )
 
                 UNION ALL
 
@@ -679,6 +762,7 @@ namespace PosDashboard.Web.Modules.System
                 INNER JOIN dbo.ITEM            i ON i.ITEM_ID     = aci.ItemId
                 WHERE a.BranchId        = @BranchId
                   AND a.AppointmentDate  = @DateOnly
+                  AND ISNULL(aci.IsRefunded, 0) = 0
                   AND (@StaffId IS NULL OR aci.StaffId = @StaffId)
 
                 UNION ALL

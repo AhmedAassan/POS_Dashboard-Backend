@@ -959,6 +959,55 @@ namespace PosDashboard.Web.Modules.System
                     PaymentStatus = (string)apt.PaymentStatus
                 }).FirstOrDefault();
 
+            // ── Insert AppointmentInvoiceLines for original + checkout extras ──
+            // Only the columns guaranteed by the NewSale migration are used.
+            // The error is surfaced so schema issues are visible during development.
+            try
+            {
+                // Original service line — ISNULL guards on TIME columns (NOT NULL in schema)
+                SqlMapper.Execute(conn, @"
+                    INSERT INTO dbo.AppointmentInvoiceLines
+                        (InvoiceId, AppointmentId, ItemId, UnitId, StaffId,
+                         UnitPrice, DiscountedUnitPrice, TotalPrice,
+                         AppointmentDate, StartTime, EndTime, DurationMinutes, Notes)
+                    SELECT
+                        @InvoiceId, a.Id, a.ItemId, a.UnitId, a.StaffId,
+                        a.DiscountedUnitPrice, a.DiscountedUnitPrice, a.DiscountedUnitPrice,
+                        a.AppointmentDate,
+                        ISNULL(a.StartTime, '00:00:00'),
+                        ISNULL(a.EndTime,   '00:00:00'),
+                        0, NULL
+                    FROM dbo.AppointmentData a
+                    WHERE a.Id = @AppointmentId",
+                    new { InvoiceId = invoiceId, AppointmentId = id });
+
+                // Extra checkout-item lines ("Add Service" during checkout)
+                // These have no time slot — inherit appointment's StartTime/EndTime
+                SqlMapper.Execute(conn, @"
+                    INSERT INTO dbo.AppointmentInvoiceLines
+                        (InvoiceId, AppointmentId, ItemId, UnitId, StaffId,
+                         UnitPrice, DiscountedUnitPrice, TotalPrice,
+                         AppointmentDate, StartTime, EndTime, DurationMinutes, Notes)
+                    SELECT
+                        @InvoiceId, ci.AppointmentId, ci.ItemId, ci.UnitId, ci.StaffId,
+                        ci.DiscountedUnitPrice, ci.DiscountedUnitPrice, ci.TotalPrice,
+                        a.AppointmentDate,
+                        ISNULL(a.StartTime, '00:00:00'),
+                        ISNULL(a.EndTime,   '00:00:00'),
+                        0, NULL
+                    FROM dbo.AppointmentCheckoutItems ci
+                    INNER JOIN dbo.AppointmentData a ON a.Id = ci.AppointmentId
+                    WHERE ci.AppointmentId = @AppointmentId",
+                    new { InvoiceId = invoiceId, AppointmentId = id });
+            }
+            catch (Exception lineEx)
+            {
+                // Checkout invoice already created above — lines are supplementary.
+                // Return a warning in the response so the error is visible to the caller.
+                return Ok(new ApiResult<CheckoutResponse>(false,
+                    $"Checkout succeeded but invoice lines failed: {lineEx.Message}", null));
+            }
+
             var invoice = new InvoiceDto(
                 Id: invoiceId,
                 InvoiceNumber: invoiceNumber,
@@ -1019,6 +1068,145 @@ namespace PosDashboard.Web.Modules.System
         }
 
         // =============================================
+        // POST /api/appointments/{id}/void-invoice
+        // =============================================
+        [HttpPost("{id:int}/void-invoice")]
+        public ActionResult<ApiResult<object>> VoidInvoice(int id)
+        {
+            using var conn = sqlConnections.NewByKey("Default");
+            using var uow = new UnitOfWork(conn);
+            try
+            {
+                // Load appointment (used as entry point — may be lead or any linked appointment)
+                var apt = SqlMapper.Query(conn, @"
+                    SELECT Id, BranchId, CheckoutStatus, Status, SaleGroupId
+                    FROM dbo.AppointmentData WHERE Id = @Id",
+                    new { Id = id }).FirstOrDefault();
+
+                if (apt == null)
+                    return Ok(new ApiResult<object>(false, "Appointment not found", null));
+
+                if ((string)apt.CheckoutStatus != "checked_out")
+                    return Ok(new ApiResult<object>(false,
+                        "Only checked-out appointments can be voided", null));
+
+                // Load invoice — try direct link first (checkout-drawer & legacy),
+                // then via AppointmentInvoiceLines (New Sale non-lead appointments).
+                var invoice = SqlMapper.Query(conn, @"
+                    SELECT TOP 1 inv.Id, inv.IsFullyRefunded,
+                           ISNULL(inv.IsVoid, 0) AS IsVoid,
+                           inv.TotalRefunded, inv.TotalAmount
+                    FROM dbo.AppointmentInvoices inv
+                    WHERE inv.AppointmentId = @Id
+                    UNION
+                    SELECT TOP 1 inv.Id, inv.IsFullyRefunded,
+                           ISNULL(inv.IsVoid, 0) AS IsVoid,
+                           inv.TotalRefunded, inv.TotalAmount
+                    FROM dbo.AppointmentInvoiceLines ail
+                    INNER JOIN dbo.AppointmentInvoices inv ON inv.Id = ail.InvoiceId
+                    WHERE ail.AppointmentId = @Id",
+                    new { Id = id }).FirstOrDefault();
+
+                if (invoice == null)
+                    return Ok(new ApiResult<object>(false, "Invoice not found", null));
+
+                if ((bool)invoice.IsVoid)
+                    return Ok(new ApiResult<object>(false,
+                        "Invoice is already voided", null));
+
+                if ((bool)invoice.IsFullyRefunded)
+                    return Ok(new ApiResult<object>(false,
+                        "Cannot void an invoice that has already been refunded", null));
+
+                if ((decimal)invoice.TotalRefunded > 0)
+                    return Ok(new ApiResult<object>(false,
+                        "Cannot void an invoice with partial refunds already processed", null));
+
+                int invoiceId = (int)invoice.Id;
+
+                // ── Collect ALL appointment IDs linked to this invoice ──────────
+                // 1) All AppointmentInvoiceLines rows (New Sale + checkout-drawer)
+                var lineApptIds = SqlMapper.Query<int>(conn, @"
+                    SELECT DISTINCT AppointmentId
+                    FROM dbo.AppointmentInvoiceLines
+                    WHERE InvoiceId = @InvoiceId",
+                    new { InvoiceId = invoiceId }).ToList();
+
+                // 2) The lead appointment (AppointmentInvoices.AppointmentId)
+                var leadApptId = (int)SqlMapper.Query<int>(conn,
+                    "SELECT AppointmentId FROM dbo.AppointmentInvoices WHERE Id = @Id",
+                    new { Id = invoiceId }).FirstOrDefault();
+
+                // Union into one distinct set
+                var allApptIds = lineApptIds.Union(new[] { leadApptId })
+                                            .Where(x => x > 0)
+                                            .Distinct()
+                                            .ToList();
+
+                // 3) Also include any other appointments sharing the same SaleGroupId
+                //    (extra safety for New Sale groups)
+                object saleGroupId = apt.SaleGroupId;
+                if (saleGroupId != null && !(saleGroupId is DBNull))
+                {
+                    var groupIds = SqlMapper.Query<int>(conn, @"
+                        SELECT Id FROM dbo.AppointmentData
+                        WHERE SaleGroupId = @SaleGroupId",
+                        new { SaleGroupId = saleGroupId }).ToList();
+                    allApptIds = allApptIds.Union(groupIds).Distinct().ToList();
+                }
+
+                // ── 1) Mark invoice as void ──────────────────────────────────────
+                SqlMapper.Execute(conn, @"
+                    UPDATE dbo.AppointmentInvoices SET IsVoid = 1
+                    WHERE Id = @Id",
+                    new { Id = invoiceId });
+
+                // ── 2) Mark all AppointmentInvoiceLines as refunded (zero revenue) ─
+                SqlMapper.Execute(conn, @"
+                    UPDATE dbo.AppointmentInvoiceLines
+                    SET IsRefunded = 1, DiscountedUnitPrice = 0, TotalPrice = 0
+                    WHERE InvoiceId = @InvoiceId",
+                    new { InvoiceId = invoiceId });
+
+                // ── 3) Cancel ALL linked appointments ────────────────────────────
+                foreach (var apptId in allApptIds)
+                {
+                    SqlMapper.Execute(conn, @"
+                        UPDATE dbo.AppointmentData
+                        SET Status         = 'cancelled',
+                            CheckoutStatus = 'open',
+                            DiscountedUnitPrice = 0,
+                            UpdatedAt      = SYSUTCDATETIME()
+                        WHERE Id = @ApptId",
+                        new { ApptId = apptId });
+                }
+
+                // ── 4) Zero out checkout extra items so Staff Performance is clean ─
+                if (allApptIds.Count > 0)
+                {
+                    SqlMapper.Execute(conn, @"
+                        UPDATE dbo.AppointmentCheckoutItems
+                        SET IsRefunded = 1, DiscountedUnitPrice = 0, TotalPrice = 0
+                        WHERE AppointmentId IN @ApptIds",
+                        new { ApptIds = allApptIds });
+                }
+
+                uow.Commit();
+
+                return Ok(new ApiResult<object>(true, null, new
+                {
+                    VoidedInvoiceId = invoiceId,
+                    CancelledApptIds = allApptIds
+                }));
+            }
+            catch (Exception ex)
+            {
+                return Ok(new ApiResult<object>(false,
+                    $"Void failed (rolled back): {ex.Message}", null));
+            }
+        }
+
+        // =============================================
         // GET /api/appointments/{id}/invoice
         // =============================================
         [HttpGet("{id:int}/invoice")]
@@ -1033,7 +1221,9 @@ namespace PosDashboard.Web.Modules.System
                 inv.Id, inv.InvoiceNumber, inv.AppointmentId,
                 inv.TotalAmount, inv.PaidAmount, inv.RemainingAmount,
                 inv.Currency, inv.PaymentTypeId, inv.PaymentStatus, inv.CreatedAt,
-                inv.PackageOfferName, inv.PackageOfferPrice
+                inv.PackageOfferName, inv.PackageOfferPrice,
+                ISNULL(inv.IsFullyRefunded, 0)     AS IsFullyRefunded,
+                ISNULL(inv.IsPartiallyRefunded, 0) AS IsPartiallyRefunded
             FROM dbo.AppointmentInvoices inv
             WHERE inv.AppointmentId = @Id
             ORDER BY inv.Id DESC",
@@ -1049,7 +1239,9 @@ namespace PosDashboard.Web.Modules.System
                     inv.Id, inv.InvoiceNumber, inv.AppointmentId,
                     inv.TotalAmount, inv.PaidAmount, inv.RemainingAmount,
                     inv.Currency, inv.PaymentTypeId, inv.PaymentStatus, inv.CreatedAt,
-                    inv.PackageOfferName, inv.PackageOfferPrice
+                    inv.PackageOfferName, inv.PackageOfferPrice,
+                    ISNULL(inv.IsFullyRefunded, 0)     AS IsFullyRefunded,
+                    ISNULL(inv.IsPartiallyRefunded, 0) AS IsPartiallyRefunded
                 FROM dbo.AppointmentInvoiceLines ail
                 INNER JOIN dbo.AppointmentInvoices inv ON inv.Id = ail.InvoiceId
                 WHERE ail.AppointmentId = @Id
@@ -1068,13 +1260,17 @@ namespace PosDashboard.Web.Modules.System
             // This is the New Sale invoice shape: one shared invoice with multiple appointment lines.
             var saleLines = SqlMapper.Query(conn, @"
         SELECT 
+            ail.Id                    AS Id,
+            ail.AppointmentId         AS AppointmentId,
+            ail.ItemId                AS ItemId,
+            ail.StaffId               AS StaffId,
+            ISNULL(ail.IsRefunded, 0) AS IsRefunded,
             i.ITEM_NAME1              AS ItemName,
             c.CUSTOMER_NAME           AS CustomerName,
             s.EnglishName             AS StaffName,
             1                         AS Quantity,
             ail.DiscountedUnitPrice   AS UnitPrice,
-            ail.TotalPrice            AS TotalPrice,
-            ail.AppointmentId         AS AppointmentId
+            ail.TotalPrice            AS TotalPrice
         FROM dbo.AppointmentInvoiceLines ail
         INNER JOIN dbo.ITEM i
             ON i.ITEM_ID = ail.ItemId
@@ -1098,6 +1294,11 @@ namespace PosDashboard.Web.Modules.System
                     int lineAppointmentId = (int)sl.AppointmentId;
 
                     lineItems.Add(new InvoiceLineItemDto(
+                        Id: (int)sl.Id,
+                        AppointmentId: (int)sl.AppointmentId,
+                        ItemId: (int)sl.ItemId,
+                        StaffId: (int)sl.StaffId,
+                        IsRefunded: (bool)sl.IsRefunded,
                         ItemName: (string)(sl.ItemName ?? ""),
                         CustomerName: (string)(sl.CustomerName ?? ""),
                         StaffName: (string)(sl.StaffName ?? ""),
@@ -1133,6 +1334,11 @@ namespace PosDashboard.Web.Modules.System
                 if (originalItem != null)
                 {
                     lineItems.Add(new InvoiceLineItemDto(
+                        Id: null,
+                        AppointmentId: (int)invoice.AppointmentId,
+                        ItemId: null,
+                        StaffId: null,
+                        IsRefunded: false,
                         ItemName: (string)(originalItem.ItemName ?? ""),
                         CustomerName: (string)(originalItem.CustomerName ?? ""),
                         StaffName: (string)(originalItem.StaffName ?? ""),
@@ -1144,6 +1350,10 @@ namespace PosDashboard.Web.Modules.System
 
                 var extraItems = SqlMapper.Query(conn, @"
             SELECT 
+                ci.Id                  AS Id,
+                ci.ItemId              AS ItemId,
+                ci.StaffId             AS StaffId,
+                ISNULL(ci.IsRefunded, 0) AS IsRefunded,
                 i.ITEM_NAME1 AS ItemName,
                 c.CUSTOMER_NAME AS CustomerName,
                 s.EnglishName AS StaffName,
@@ -1164,6 +1374,11 @@ namespace PosDashboard.Web.Modules.System
                 foreach (var extra in extraItems)
                 {
                     lineItems.Add(new InvoiceLineItemDto(
+                        Id: (int)extra.Id,
+                        AppointmentId: (int)invoice.AppointmentId,
+                        ItemId: (int)extra.ItemId,
+                        StaffId: (int)extra.StaffId,
+                        IsRefunded: (bool)extra.IsRefunded,
                         ItemName: (string)(extra.ItemName ?? ""),
                         CustomerName: (string)(extra.CustomerName ?? ""),
                         StaffName: (string)(extra.StaffName ?? ""),
@@ -1201,6 +1416,42 @@ namespace PosDashboard.Web.Modules.System
                 ))
                 .ToList();
 
+            // ── Refund lines for this invoice ─────────────────────────
+            // Also join via RefundTransactionLines → AppointmentInvoiceLines → InvoiceId
+            // to catch any legacy records where InvoiceId wasn't stored directly.
+            var refundLines = SqlMapper.Query(conn, @"
+                SELECT DISTINCT
+                       rt.Id AS RefundTransactionId,
+                       rt.RefundType,
+                       rt.RefundAmount AS Amount,
+                       rt.ProcessedAt,
+                       rt.CancellationReason
+                FROM dbo.RefundTransactions rt
+                WHERE rt.Deleted = 0
+                  AND (
+                    rt.InvoiceId = @InvoiceId
+                    OR rt.Id IN (
+                        SELECT DISTINCT rtl.RefundTransactionId
+                        FROM dbo.RefundTransactionLines rtl
+                        INNER JOIN dbo.AppointmentInvoiceLines ail
+                            ON ail.Id = rtl.InvoiceLineId
+                        WHERE ail.InvoiceId = @InvoiceId
+                    )
+                  )
+                ORDER BY rt.ProcessedAt",
+                new { InvoiceId = invoiceId })
+                .Select(r => new RefundLineDto(
+                    RefundTransactionId: (int)r.RefundTransactionId,
+                    RefundType: (string)r.RefundType,
+                    Amount: (decimal)r.Amount,
+                    ProcessedAt: (DateTime)r.ProcessedAt,
+                    CancellationReason: r.CancellationReason is DBNull ? null : (string?)r.CancellationReason
+                )).ToList();
+
+            decimal totalRefunded = refundLines.Sum(r => r.Amount);
+            bool isFullyRefunded = invoice.IsFullyRefunded != null && Convert.ToBoolean(invoice.IsFullyRefunded);
+            bool isPartiallyRefunded = invoice.IsPartiallyRefunded != null && Convert.ToBoolean(invoice.IsPartiallyRefunded);
+
             var dto = new DetailedInvoiceDto(
                 Id: invoiceId,
                 InvoiceNumber: (string)invoice.InvoiceNumber,
@@ -1217,7 +1468,11 @@ namespace PosDashboard.Web.Modules.System
                 PackageOfferName: invoice.PackageOfferName is DBNull || invoice.PackageOfferName == null
                     ? null : (string?)invoice.PackageOfferName,
                 PackageOfferPrice: invoice.PackageOfferPrice is DBNull || invoice.PackageOfferPrice == null
-                    ? null : (decimal?)invoice.PackageOfferPrice
+                    ? null : (decimal?)invoice.PackageOfferPrice,
+                TotalRefunded: totalRefunded,
+                IsFullyRefunded: isFullyRefunded,
+                IsPartiallyRefunded: isPartiallyRefunded,
+                RefundLines: refundLines
             );
 
             return Ok(new ApiResult<DetailedInvoiceDto>(true, null, dto));

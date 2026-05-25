@@ -209,6 +209,13 @@ namespace PosDashboard.Web.Modules.System.Models
 
         // Updated invoice to include line items
         public record InvoiceLineItemDto(
+            // Refund-critical IDs — null for legacy (non-AppointmentInvoiceLines) rows
+            int? Id,
+            int? AppointmentId,
+            int? ItemId,
+            int? StaffId,
+            bool IsRefunded,
+            // Display fields
             string ItemName,
             string CustomerName,
             string StaffName,
@@ -216,6 +223,15 @@ namespace PosDashboard.Web.Modules.System.Models
             decimal UnitPrice,
             decimal TotalPrice,
             bool IsOriginal
+        );
+
+        /// <summary>One refund transaction linked to this invoice</summary>
+        public record RefundLineDto(
+            int RefundTransactionId,
+            string RefundType,        // CASH | LINK | WALLET
+            decimal Amount,
+            DateTime ProcessedAt,
+            string? CancellationReason
         );
 
         public record DetailedInvoiceDto(
@@ -231,8 +247,13 @@ namespace PosDashboard.Web.Modules.System.Models
             DateTime CreatedAt,
             List<InvoiceLineItemDto> LineItems,
             List<AppointmentPaymentDetailDto> Payments,
-            string? PackageOfferName,    
-            decimal? PackageOfferPrice
+            string? PackageOfferName,
+            decimal? PackageOfferPrice,
+            // Refund summary
+            decimal TotalRefunded,
+            bool IsFullyRefunded,
+            bool IsPartiallyRefunded,
+            List<RefundLineDto> RefundLines
         );
 
         /*split payment history*/

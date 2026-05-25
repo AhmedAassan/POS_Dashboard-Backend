@@ -76,7 +76,11 @@ namespace PosDashboard.Web.Modules.System.Models
             string? RefundType,
             int? PackageOfferId,
             string? PackageOfferName,
-            decimal? PackageOfferPrice
+            decimal? PackageOfferPrice,
+            /// <summary>True when all invoice lines have been refunded</summary>
+            bool IsFullyRefunded,
+            /// <summary>True when the invoice was voided (cancelled without refund)</summary>
+            bool IsVoid
         );
 
         public record StaffPerformanceDto(

@@ -163,17 +163,21 @@ namespace PosDashboard.Web.Modules.System
                 }
                 else
                 {
-                    // Full invoice refund
-                    refundAmount = invoiceTotal - alreadyRefunded;
-
-                    if (refundAmount <= 0)
-                        return Ok(new ApiResult<RefundResponse>(false,
-                            "Nothing left to refund on this invoice", null));
-
+                    // Full invoice refund (all remaining non-refunded lines)
                     if (isNewSaleInvoice)
                     {
-                        refundLines = invoiceLines
+                        // Use the actual unrefunded line amounts — immune to TotalAmount corruption
+                        var unrefundedLines = invoiceLines
                             .Where(l => !(bool)l.IsRefunded)
+                            .ToList();
+
+                        if (unrefundedLines.Count == 0)
+                            return Ok(new ApiResult<RefundResponse>(false,
+                                "Nothing left to refund on this invoice", null));
+
+                        refundAmount = unrefundedLines.Sum(l => (decimal)l.LineAmount);
+
+                        refundLines = unrefundedLines
                             .Select(l => ((int?)((int)l.InvoiceLineId), (int)l.AppointmentId,
                                           (int)l.ItemId, (int)l.StaffId,
                                           (decimal)l.LineAmount,
@@ -182,7 +186,13 @@ namespace PosDashboard.Web.Modules.System
                     }
                     else
                     {
-                        // Legacy single-appointment invoice
+                        // Legacy invoice — fall back to TotalAmount - TotalRefunded
+                        refundAmount = invoiceTotal - alreadyRefunded;
+
+                        if (refundAmount <= 0)
+                            return Ok(new ApiResult<RefundResponse>(false,
+                                "Nothing left to refund on this invoice", null));
+
                         var legacyAppt = SqlMapper.Query(conn, @"
                             SELECT a.Id, a.ItemId, a.StaffId,
                                    i.ITEM_NAME1 AS ItemName, s.EnglishName AS StaffName
@@ -205,10 +215,19 @@ namespace PosDashboard.Web.Modules.System
                     }
                 }
 
-                if (refundAmount + alreadyRefunded > invoiceTotal + 0.001m)
+                // Over-refund guard: for line-based invoices use the sum of all line amounts
+                // (immune to TotalAmount corruption); for legacy use invoiceTotal.
+                decimal originalInvoiceTotal = isNewSaleInvoice
+                    ? invoiceLines.Sum(l => (decimal)l.LineAmount)
+                    : invoiceTotal;
+                decimal alreadyRefundedAmount = invoiceLines.Count > 0
+                    ? invoiceLines.Where(l => (bool)l.IsRefunded).Sum(l => (decimal)l.LineAmount)
+                    : alreadyRefunded;
+
+                if (refundAmount + alreadyRefundedAmount > originalInvoiceTotal + 0.001m)
                     return Ok(new ApiResult<RefundResponse>(false,
                         $"Refund amount ({refundAmount:F3}) exceeds refundable balance " +
-                        $"({invoiceTotal - alreadyRefunded:F3})", null));
+                        $"({originalInvoiceTotal - alreadyRefundedAmount:F3})", null));
 
                 // Collect affected appointment IDs
                 var affectedAppointmentIds = refundLines
@@ -320,14 +339,33 @@ namespace PosDashboard.Web.Modules.System
                 }
 
                 // ── STEP G: Cancel fully-refunded appointments ────────
+                // Re-query the DB AFTER STEP E updates so IsRefunded flags are accurate.
+                // An appointment is fully refunded only when ALL its invoice lines are
+                // now marked IsRefunded = 1 in the DB.
                 bool apptsCancelled = false;
                 foreach (var apptId in affectedAppointmentIds)
                 {
-                    bool fullyRefunded = !isNewSaleInvoice ||
-                        (request.Lines == null || request.Lines.Count == 0) ||
-                        !invoiceLines.Any(l => (int)l.AppointmentId == apptId &&
-                                               !(bool)l.IsRefunded &&
-                                               !refundLines.Any(rl => rl.InvoiceLineId == (int)l.InvoiceLineId));
+                    bool fullyRefunded;
+
+                    if (!isNewSaleInvoice)
+                    {
+                        // Legacy single-appointment invoice — always fully refunded here
+                        fullyRefunded = true;
+                    }
+                    else
+                    {
+                        // Count how many lines for this appointment still have IsRefunded = 0
+                        int remainingLines = SqlMapper.Query<int>(conn, @"
+                            SELECT COUNT(*)
+                            FROM dbo.AppointmentInvoiceLines
+                            WHERE InvoiceId      = @InvoiceId
+                              AND AppointmentId  = @ApptId
+                              AND ISNULL(IsRefunded, 0) = 0",
+                            new { InvoiceId = request.InvoiceId, ApptId = apptId })
+                            .FirstOrDefault();
+
+                        fullyRefunded = remainingLines == 0;
+                    }
 
                     if (fullyRefunded)
                     {
@@ -346,6 +384,11 @@ namespace PosDashboard.Web.Modules.System
                 // ── STEP H: Adjust staff revenue (DiscountedUnitPrice) ─
                 foreach (var rl in refundLines)
                 {
+                    // Reduce the original appointment's DiscountedUnitPrice.
+                    // For the lead appointment, this covers the main service.
+                    // For checkout-drawer extras that now have AppointmentInvoiceLines rows,
+                    // the AppointmentId points back to the same single appointment —
+                    // we reduce checkout item price separately below.
                     SqlMapper.Execute(conn, @"
                         UPDATE dbo.AppointmentData
                         SET DiscountedUnitPrice = CASE
@@ -356,6 +399,22 @@ namespace PosDashboard.Web.Modules.System
                             UpdatedAt = SYSUTCDATETIME()
                         WHERE Id = @AppointmentId",
                         new { AppointmentId = rl.AppointmentId, Amount = rl.Amount });
+
+                    // Also reduce the matching AppointmentCheckoutItems row if the
+                    // refunded line maps to a checkout extra (identified by InvoiceLineId →
+                    // AppointmentInvoiceLines.ItemId + StaffId cross-reference).
+                    if (rl.InvoiceLineId.HasValue)
+                    {
+                        SqlMapper.Execute(conn, @"
+                            UPDATE dbo.AppointmentCheckoutItems
+                            SET IsRefunded = 1,
+                                DiscountedUnitPrice = 0,
+                                TotalPrice          = 0
+                            WHERE AppointmentId = @AppointmentId
+                              AND ItemId  = (SELECT ItemId  FROM dbo.AppointmentInvoiceLines WHERE Id = @LineId)
+                              AND StaffId = (SELECT StaffId FROM dbo.AppointmentInvoiceLines WHERE Id = @LineId)",
+                            new { AppointmentId = rl.AppointmentId, Amount = rl.Amount, LineId = rl.InvoiceLineId.Value });
+                    }
                 }
 
                 // ── STEP I: Wallet credit (if RefundType='WALLET') ────
