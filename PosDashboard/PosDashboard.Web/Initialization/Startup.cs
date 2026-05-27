@@ -170,15 +170,14 @@ namespace PosDashboard
             {
                 options.AddPolicy("DevCors", policy =>
                 {
+                    var frontendUrls = Configuration
+                        .GetSection("FrontendBaseUrls")
+                        .Get<string[]>() ?? new string[0];
+
                     policy
-                        .WithOrigins("http://localhost:4200", "https://shopics.net:290",
-                                     "https://shopics.net:291", "https://shopics.net:292", 
-                                     "https://shopics.net:293", "https://shopics.net:294",
-                                     "https://shopics.net:295", "https://shopics.net:296",
-                                     "https://shopics.net:289")
+                        .WithOrigins(frontendUrls)
                         .AllowAnyHeader()
                         .AllowAnyMethod();
-                    // .AllowCredentials(); // استخدمها فقط لو هتستخدم Cookies cross-site
                 });
             });
 

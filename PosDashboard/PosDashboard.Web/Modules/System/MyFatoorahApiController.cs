@@ -552,7 +552,11 @@ namespace PosDashboard.Web.Modules.System
                 queryParams.Add($"reason={Uri.EscapeDataString(error)}");
 
             var query = string.Join("&", queryParams);
-            var frontendBaseUrl = configuration["FrontendBaseUrl"];
+            var frontendUrls = configuration
+            .GetSection("FrontendBaseUrls")
+            .Get<string[]>();
+
+            var frontendBaseUrl = frontendUrls?.FirstOrDefault();
 
             if (!string.IsNullOrWhiteSpace(frontendBaseUrl))
                 return Redirect($"{frontendBaseUrl}/payment/result?{query}");

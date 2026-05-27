@@ -924,7 +924,8 @@ namespace PosDashboard.Web.Modules.System
                     si.Price         AS Price,
                     iu.Deposit       AS Deposit,
                     CAST(iu.ITEM_UNIT_DURATION AS FLOAT) AS Duration,
-                    i.DocumentName
+                    i.DocumentName,
+                    si.Notes AS Notes   
                 FROM dbo.StaffItems si
                 INNER JOIN dbo.ITEM_UNIT iu
                     ON iu.ITEM_UNIT_ID = si.ItemUnitId

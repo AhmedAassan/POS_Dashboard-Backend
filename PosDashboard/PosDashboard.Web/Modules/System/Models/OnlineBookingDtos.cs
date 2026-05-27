@@ -170,8 +170,9 @@ namespace PosDashboard.Web.Modules.System.Models
             string EnglishName,
             decimal Price,
             decimal Deposit,
-            double? Duration,      // minutes (ITEM_UNIT_DURATION)
-            string? DocumentName
+            double? Duration,
+            string? DocumentName,
+            string? Notes         
         );
 
         /// POST /api/online/availability/time-slots
