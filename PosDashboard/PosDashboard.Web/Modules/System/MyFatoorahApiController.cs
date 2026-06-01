@@ -741,7 +741,15 @@ namespace PosDashboard.Web.Modules.System
                     new { Id = appointmentId }).FirstOrDefault();
 
                 if (apt == null) return;
-
+                // Retrieve company data from the database
+                var companyInfo = conn.Query<dynamic>(@"
+                SELECT TOP 1 
+                    COMPANY_NAME1, COMPANY_NAME2,
+                    COMPANY_ADRESS1, COMPANY_ADRESS2,
+                    COMPANY_PHONE, COMPANY_LOGO,
+                    FOOTER, FOOTER1, FOOTER2, FOOTER3, FOOTER4, FOOTER5
+                FROM dbo.COMPANY
+                ORDER BY COMPANY_ID").FirstOrDefault();
                 string invoiceNumber = (string?)apt.InvoiceNumber
                     ?? $"INV-{DateTime.UtcNow:yyyyMMdd}-{appointmentId}";
                 string currency = (string)(apt.EnglishCurrencyName ?? "KWD");
@@ -761,14 +769,30 @@ namespace PosDashboard.Web.Modules.System
                     PaymentMethod = paymentMethod ?? "Online Payment",
                     PaymentStatus = (decimal)apt.PaidAmount >= (decimal)apt.TotalPrice ? "Paid" : "Deposit Paid",
                     Notes = (string?)apt.Notes,
+
+                    SalonName = (string?)(companyInfo?.COMPANY_NAME1) ?? "Salon",
+                    SalonNameAr = (string?)(companyInfo?.COMPANY_NAME2) ?? "",
+                    SalonAddress = (string?)(companyInfo?.COMPANY_ADRESS1) ?? "",
+                    SalonPhone = (string?)(companyInfo?.COMPANY_PHONE) ?? "",
+
+                    SalonLogoUrl = companyInfo?.COMPANY_LOGO != null
+                    ? (((string)companyInfo.COMPANY_LOGO).StartsWith("http")
+                        ? (string)companyInfo.COMPANY_LOGO
+                        : $"{Request.Scheme}://{Request.Host}{companyInfo.COMPANY_LOGO}")
+                    : null,
+
+                    FooterLine1 = (string?)(companyInfo?.FOOTER),
+                    FooterLine2 = (string?)(companyInfo?.FOOTER1),
+                    FooterLine3 = (string?)(companyInfo?.FOOTER2),
+
                     LineItems = new List<InvoiceLineData>
                     {
                         new InvoiceLineData
                         {
-                            ItemName = (string)(apt.ItemEnName ?? apt.ItemArName ?? "Service"),
+                            ItemName  = (string)(apt.ItemEnName ?? apt.ItemArName ?? "Service"),
                             StaffName = (string)(apt.StaffEnName ?? apt.StaffArName ?? ""),
-                            Quantity = 1,
-                            UnitPrice = (decimal)apt.DiscountedUnitPrice,
+                            Quantity  = 1,
+                            UnitPrice  = (decimal)apt.DiscountedUnitPrice,
                             TotalPrice = (decimal)apt.DiscountedUnitPrice
                         }
                     }

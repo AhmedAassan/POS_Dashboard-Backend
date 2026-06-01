@@ -6,6 +6,7 @@ using QuestPDF.Infrastructure;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Net.Http;
 
 namespace PosDashboard.Web.Modules.System.Services
 {
@@ -35,7 +36,12 @@ namespace PosDashboard.Web.Modules.System.Services
         public string SalonNameAr { get; set; } = "صالون جلامور للتجميل";
         public string SalonAddress { get; set; } = "Block 5, Street 12, Kuwait City";
         public string SalonPhone { get; set; } = "+965 2222 3333";
+        public string? SalonLogoUrl { get; set; }
         public string? Notes { get; set; }
+        public string? FooterLine1 { get; set; }
+        public string? FooterLine2 { get; set; }
+        public string? FooterLine3 { get; set; }
+
         public List<InvoiceLineData> LineItems { get; set; } = new();
     }
 
@@ -67,24 +73,72 @@ namespace PosDashboard.Web.Modules.System.Services
             return stream.ToArray();
         }
 
+
         private static void ComposeHeader(IContainer container, InvoicePdfData data)
         {
             container.Column(column =>
             {
                 column.Item().Row(row =>
                 {
-                    row.RelativeItem().Column(col =>
+                    // ← Logo + Salon info
+                    row.RelativeItem().Row(logoRow =>
                     {
-                        col.Item().Text(data.SalonName)
-                            .FontSize(18).Bold().FontColor("#1f2937");
-                        col.Item().Text(data.SalonNameAr)
-                            .FontSize(14).FontColor("#6b7280");
-                        col.Item().Text(data.SalonAddress)
-                            .FontSize(9).FontColor("#9ca3af");
-                        col.Item().Text($"Tel: {data.SalonPhone}")
-                            .FontSize(9).FontColor("#9ca3af");
+                        // Logo لو موجود
+                        if (!string.IsNullOrWhiteSpace(data.SalonLogoUrl))
+                        {
+                            try
+                            {
+                                byte[]? logoBytes = null;
+
+                                if (data.SalonLogoUrl.StartsWith("data:image"))
+                                {
+                                    // Base64 image
+                                    var base64 = data.SalonLogoUrl
+                                        .Substring(data.SalonLogoUrl.IndexOf(',') + 1);
+                                    logoBytes = Convert.FromBase64String(base64);
+                                }
+                                else
+                                {
+                                    // URL — حمّله sync
+                                    using var http = new HttpClient();
+                                    http.Timeout = TimeSpan.FromSeconds(5);
+                                    logoBytes = http.GetByteArrayAsync(data.SalonLogoUrl)
+                                        .GetAwaiter().GetResult();
+                                }
+
+                                if (logoBytes != null)
+                                {
+                                    logoRow.ConstantItem(60)
+                                        .PaddingRight(10)
+                                        .AlignMiddle()
+                                        .Image(logoBytes)
+                                        .FitArea();
+                                }
+                            }
+                            catch
+                            {
+                                // لو فشل تحميل الـ logo، تجاهله وكمّل
+                            }
+                        }
+
+                        // Salon info
+                        logoRow.RelativeItem().Column(col =>
+                        {
+                            col.Item().Text(data.SalonName)
+                                .FontSize(18).Bold().FontColor("#1f2937");
+                            if (!string.IsNullOrWhiteSpace(data.SalonNameAr))
+                                col.Item().Text(data.SalonNameAr)
+                                    .FontSize(14).FontColor("#6b7280");
+                            if (!string.IsNullOrWhiteSpace(data.SalonAddress))
+                                col.Item().Text(data.SalonAddress)
+                                    .FontSize(9).FontColor("#9ca3af");
+                            if (!string.IsNullOrWhiteSpace(data.SalonPhone))
+                                col.Item().Text($"Tel: {data.SalonPhone}")
+                                    .FontSize(9).FontColor("#9ca3af");
+                        });
                     });
 
+                    // INVOICE label على اليمين
                     row.ConstantItem(120).Column(col =>
                     {
                         col.Item().AlignRight().Text("INVOICE")
@@ -98,7 +152,6 @@ namespace PosDashboard.Web.Modules.System.Services
                     .LineHorizontal(1).LineColor("#e5e7eb");
             });
         }
-
         private static void ComposeContent(IContainer container, InvoicePdfData data)
         {
             container.PaddingVertical(10).Column(column =>
@@ -261,10 +314,30 @@ namespace PosDashboard.Web.Modules.System.Services
                 column.Item().LineHorizontal(1).LineColor("#e5e7eb");
                 column.Item().PaddingTop(8).AlignCenter().Column(footer =>
                 {
-                    footer.Item().Text("Thank you for your visit!")
-                        .FontSize(10).FontColor("#6b7280");
-                    footer.Item().Text("شكراً لزيارتكم")
-                        .FontSize(10).FontColor("#9ca3af");
+                    bool hasFooter = !string.IsNullOrWhiteSpace(data.FooterLine1)
+                                  || !string.IsNullOrWhiteSpace(data.FooterLine2)
+                                  || !string.IsNullOrWhiteSpace(data.FooterLine3);
+
+                    if (hasFooter)
+                    {
+                        if (!string.IsNullOrWhiteSpace(data.FooterLine1))
+                            footer.Item().Text(data.FooterLine1)
+                                .FontSize(10).FontColor("#6b7280");
+                        if (!string.IsNullOrWhiteSpace(data.FooterLine2))
+                            footer.Item().Text(data.FooterLine2)
+                                .FontSize(10).FontColor("#9ca3af");
+                        if (!string.IsNullOrWhiteSpace(data.FooterLine3))
+                            footer.Item().Text(data.FooterLine3)
+                                .FontSize(9).FontColor("#9ca3af");
+                    }
+                    else
+                    {
+                        // fallback if the database is empty
+                        footer.Item().Text("Thank you for your visit!")
+                            .FontSize(10).FontColor("#6b7280");
+                        footer.Item().Text("شكراً لزيارتكم")
+                            .FontSize(10).FontColor("#9ca3af");
+                    }
                 });
             });
         }
