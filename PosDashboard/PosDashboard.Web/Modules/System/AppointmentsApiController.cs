@@ -349,7 +349,11 @@ namespace PosDashboard.Web.Modules.System
         {
             using var conn = sqlConnections.NewByKey("Default");
 
-            var where = new List<string> { "a.BranchId = @BranchId" };
+            var where = new List<string>
+            {
+                "a.BranchId = @BranchId",
+                "ISNULL(a.ShowOnCalendar, 1) = 1"   // hide New Sales flagged off-calendar
+            };
             var parameters = new Dapper.DynamicParameters();
             parameters.Add("BranchId", branchId);
 

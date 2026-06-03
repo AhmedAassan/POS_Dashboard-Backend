@@ -406,7 +406,8 @@ namespace PosDashboard.Web.Modules.System
                                 NumberOfPersons, ServiceType, IsOnlineBooking, Notes,
                                 UnitPrice, DiscountPercent, DiscountedUnitPrice, TotalPrice,
                                 PaidAmount, PaymentStatus, DepositAmount,
-                                Status, CheckoutStatus, CreatedAt, SaleGroupId
+                                Status, CheckoutStatus, CreatedAt, SaleGroupId,
+                                ShowOnCalendar
                             )
                             OUTPUT INSERTED.Id
                             VALUES (
@@ -415,7 +416,8 @@ namespace PosDashboard.Web.Modules.System
                                 @NumberOfPersons, @ServiceType, 0, @Notes,
                                 @UnitPrice, @DiscountPercent, @DiscountedUnitPrice, @TotalPrice,
                                 @PaidAmount, @PaymentStatus, @DepositAmount,
-                                'completed', 'checked_out', SYSUTCDATETIME(), @SaleGroupId
+                                'completed', 'checked_out', SYSUTCDATETIME(), @SaleGroupId,
+                                @ShowOnCalendar
                             )",
                             new
                             {
@@ -438,7 +440,8 @@ namespace PosDashboard.Web.Modules.System
                                 PaidAmount = rl.SalePrice,
                                 PaymentStatus = "FULL",
                                 DepositAmount = 0m,
-                                SaleGroupId = saleGroupId
+                                SaleGroupId = saleGroupId,
+                                ShowOnCalendar = request.AddOnCalendar ? 1 : 0
                             }).First();
 
                         apptIds.Add(newId);

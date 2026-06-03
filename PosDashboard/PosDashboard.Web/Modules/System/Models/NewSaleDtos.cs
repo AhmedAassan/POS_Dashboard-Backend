@@ -47,7 +47,8 @@ namespace PosDashboard.Web.Modules.System.Models
             NewSalePaymentsRequest? Payments,
             bool SendWhatsApp,
             int? PackageOfferId,      // ← Add this (nullable — null = normal sale)
-            string? PackageOfferName  // ← Add this to the invoice
+            string? PackageOfferName,  // ← Add this to the invoice
+            bool AddOnCalendar = true  // false = counts in Dashboard but hidden from calendar
         );
 
         // ===== Response =====
