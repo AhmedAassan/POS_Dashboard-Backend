@@ -853,22 +853,69 @@ namespace PosDashboard.Web.Modules.System
                         ? null : request.VoucherCode.Trim()
                 });
 
-            // ✅ NEW: If already checked out, update the existing invoice too
+            // If already checked out, keep the linked invoice in sync.
             if ((string)apt.CheckoutStatus == "checked_out")
             {
-                SqlMapper.Execute(conn, @"
-            UPDATE dbo.AppointmentInvoices SET
-                PaidAmount = @PaidAmount,
-                RemainingAmount = @RemainingAmount,
-                PaymentStatus = @PaymentStatus
-            WHERE AppointmentId = @AppointmentId",
-                    new
+                // Part of a multi-service group?
+                var saleGroupId = SqlMapper.Query<Guid?>(conn,
+                    "SELECT SaleGroupId FROM dbo.AppointmentData WHERE Id = @Id",
+                    new { Id = id }).FirstOrDefault();
+
+                if (saleGroupId.HasValue)
+                {
+                    // CONSOLIDATED invoice: it can be anchored on ANY member, so find
+                    // it through the invoice lines, then recompute from the WHOLE group.
+                    var invId = SqlMapper.Query<int?>(conn, @"
+                        SELECT TOP 1 il.InvoiceId
+                        FROM dbo.AppointmentInvoiceLines il
+                        INNER JOIN dbo.AppointmentData a ON a.Id = il.AppointmentId
+                        WHERE a.SaleGroupId = @G
+                        ORDER BY il.InvoiceId",
+                        new { G = saleGroupId.Value }).FirstOrDefault();
+
+                    if (invId.HasValue)
                     {
-                        AppointmentId = id,
-                        PaidAmount = newPaid,
-                        RemainingAmount = newRemaining,
-                        PaymentStatus = newPaymentStatus
-                    });
+                        var groupPaid = SqlMapper.Query<decimal>(conn,
+                            "SELECT ISNULL(SUM(PaidAmount), 0) FROM dbo.AppointmentData WHERE SaleGroupId = @G",
+                            new { G = saleGroupId.Value }).FirstOrDefault();
+                        var invTotal = SqlMapper.Query<decimal>(conn,
+                            "SELECT TotalAmount FROM dbo.AppointmentInvoices WHERE Id = @Id",
+                            new { Id = invId.Value }).FirstOrDefault();
+                        var invRemaining = invTotal - groupPaid;
+                        var invStatus = invRemaining <= 0 ? "FULL" : (groupPaid > 0 ? "DEPOSIT" : "NONE");
+
+                        SqlMapper.Execute(conn, @"
+                    UPDATE dbo.AppointmentInvoices SET
+                        PaidAmount = @PaidAmount,
+                        RemainingAmount = @RemainingAmount,
+                        PaymentStatus = @PaymentStatus
+                    WHERE Id = @Id",
+                            new
+                            {
+                                Id = invId.Value,
+                                PaidAmount = groupPaid,
+                                RemainingAmount = invRemaining,
+                                PaymentStatus = invStatus
+                            });
+                    }
+                }
+                else
+                {
+                    // Single appointment: invoice is anchored on this appointment (original behaviour).
+                    SqlMapper.Execute(conn, @"
+                    UPDATE dbo.AppointmentInvoices SET
+                        PaidAmount = @PaidAmount,
+                        RemainingAmount = @RemainingAmount,
+                        PaymentStatus = @PaymentStatus
+                    WHERE AppointmentId = @AppointmentId",
+                        new
+                        {
+                            AppointmentId = id,
+                            PaidAmount = newPaid,
+                            RemainingAmount = newRemaining,
+                            PaymentStatus = newPaymentStatus
+                        });
+                }
             }
 
             var result = GetAppointmentById(conn, id);
@@ -1394,21 +1441,27 @@ namespace PosDashboard.Web.Modules.System
             }
             // أضف query للـ payments قبل بناء الـ dto
             var invoicePayments = SqlMapper.Query(conn, @"
-    SELECT 
-        ap.Id,
-        ap.Amount,
-        ap.PaymentTypeId,
-        pt.INVOICE_PAYMENT_TYPE_NAME1 AS PaymentTypeName,
-        ap.PaymentAs,
-        ap.VoucherCode,
-        ap.PaidAt,
-        ap.IsWalletPayment
-    FROM dbo.AppointmentPayments ap
-    LEFT JOIN dbo.INVOICE_PAYMENT_TYPE pt 
-        ON pt.INVOICE_PAYMENT_TYPE_ID = ap.PaymentTypeId
-    WHERE ap.AppointmentId = @AppointmentId
-    ORDER BY ap.PaidAt",
-                new { AppointmentId = (int)invoice.AppointmentId })
+            SELECT 
+                MIN(ap.Id)                    AS Id,
+                SUM(ap.Amount)                AS Amount,
+                ap.PaymentTypeId,
+                pt.INVOICE_PAYMENT_TYPE_NAME1 AS PaymentTypeName,
+                MAX(ap.PaymentAs)             AS PaymentAs,
+                MAX(ap.VoucherCode)           AS VoucherCode,
+                MIN(ap.PaidAt)                AS PaidAt,
+                ap.IsWalletPayment
+            FROM dbo.AppointmentPayments ap
+            LEFT JOIN dbo.INVOICE_PAYMENT_TYPE pt 
+                ON pt.INVOICE_PAYMENT_TYPE_ID = ap.PaymentTypeId
+            WHERE ap.AppointmentId = @AppointmentId
+               OR ap.AppointmentId IN (
+                   SELECT ail.AppointmentId
+                   FROM dbo.AppointmentInvoiceLines ail
+                   WHERE ail.InvoiceId = @InvoiceId
+               )
+            GROUP BY ap.PaymentTypeId, pt.INVOICE_PAYMENT_TYPE_NAME1, ap.IsWalletPayment
+            ORDER BY MIN(ap.PaidAt)",
+                new { AppointmentId = (int)invoice.AppointmentId, InvoiceId = invoiceId })
                 .Select(p => new AppointmentPaymentDetailDto(
                     Id: (int)p.Id,
                     Amount: (decimal)p.Amount,

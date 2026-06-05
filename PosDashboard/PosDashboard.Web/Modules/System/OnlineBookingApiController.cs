@@ -886,14 +886,15 @@ namespace PosDashboard.Web.Modules.System
                     iu.ITEM_UNIT_PRICE AS Price,
                     iu.Deposit         AS Deposit,
                     CAST(iu.ITEM_UNIT_DURATION AS FLOAT) AS Duration,
-                    i.DocumentName
+                    i.DocumentName,
+                    CAST(NULL AS NVARCHAR(500)) AS Notes
                 FROM dbo.ITEM_UNIT iu
                 INNER JOIN dbo.ITEM i
                     ON i.ITEM_ID = iu.ITEM_ID
                 INNER JOIN dbo.AppointmentCategories ac
                     ON ac.Id = i.AppointmentCategoryId
                 WHERE iu.Active = 1
-                  AND iu.BranchId = @BranchId
+                  AND (iu.BranchId = @BranchId OR iu.BranchId IS NULL)
                   AND ac.Id = @CategoryId
                   AND (i.ITEM_IS_ACTIVE = 1 OR i.ITEM_IS_ACTIVE IS NULL)
                   AND ac.Deleted = 0
