@@ -4,10 +4,12 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
+using PosDashboard.Web.Modules.System.Services;   // InvoicePdfData + PdfInvoiceService
 using Serenity.Data;
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Diagnostics;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -15,7 +17,6 @@ using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
-
 using AppointmentDtoModel = PosDashboard.Web.Modules.System.Models.AppointmentDtos.AppointmentDto;
 using NewSaleDtos = PosDashboard.Web.Modules.System.Models.NewSaleDtos;
 
@@ -588,7 +589,9 @@ namespace PosDashboard.Web.Modules.System
                     }
 
                     uow.Commit();
-
+                    // ولّد وخزّن PDF الفاتورة عشان لينك invoice-pdf يشتغل (البيع المباشر مش بيعدّي على MyFatoorah)
+                    try { GenerateAndStoreInvoicePdf(conn, leadApptId); }
+                    catch (Exception ex) { Debug.WriteLine($"[NewSale PDF] {ex.Message}"); }
                     // -------- After commit: read back + WhatsApp --------
                     var apptDtos = apptIds
                         .Select(id => GetAppointmentById(conn, id))
@@ -605,6 +608,7 @@ namespace PosDashboard.Web.Modules.System
                         {
                             (waSent, waErr) = await SendSaleConfirmationAsync(
                                 conn,
+                                appointmentId: leadApptId,
                                 customerName: (string)customer.CUSTOMER_NAME,
                                 customerPhone: (string)customer.CUSTOMER_PHONE1,
                                 customerLang: (string)customer.Lang,
@@ -877,6 +881,7 @@ namespace PosDashboard.Web.Modules.System
 
         private async Task<(bool Sent, string? Error)> SendSaleConfirmationAsync(
             IDbConnection conn,
+            int appointmentId,
             string customerName, string customerPhone, string customerLang,
             DateTime saleDate, string currency, string currencyAr,
             string invoiceNumber,
@@ -893,14 +898,14 @@ namespace PosDashboard.Web.Modules.System
             string header = (string?)config.HeaderText ?? "";
             string footer = (string?)config.FooterText ?? "";
             string instanceId = (string?)config.InstanceId ?? "51d2e384a1ef86b";
-
+            string pdfUrl = $"{Request.Scheme}://{Request.Host}/api/myfatoorah/invoice-pdf/{appointmentId}";
             string message = customerLang == "en"
-                ? BuildSaleMessageEn(header, footer, customerName, saleDate,
-                                     invoiceNumber, lines, grandTotal,
-                                     paidTotal, walletAmount, currency)
-                : BuildSaleMessageAr(header, footer, customerName, saleDate,
-                                     invoiceNumber, lines, grandTotal,
-                                     paidTotal, walletAmount, currencyAr);
+            ? BuildSaleMessageEn(header, footer, customerName, saleDate,
+                                 invoiceNumber, lines, grandTotal,
+                                 paidTotal, walletAmount, currency, pdfUrl)
+            : BuildSaleMessageAr(header, footer, customerName, saleDate,
+                                 invoiceNumber, lines, grandTotal,
+                                 paidTotal, walletAmount, currencyAr, pdfUrl);
 
             string phone = NormalizePhone(customerPhone);
 
@@ -923,31 +928,24 @@ namespace PosDashboard.Web.Modules.System
         private static string BuildSaleMessageEn(
             string header, string footer, string customerName, DateTime saleDate,
             string invoiceNumber, List<ResolvedLine> lines,
-            decimal total, decimal paid, decimal walletAmount, string currency)
+            decimal total, decimal paid, decimal walletAmount, string currency, string pdfUrl)
         {
             var sb = new StringBuilder();
             if (!string.IsNullOrWhiteSpace(header)) { sb.AppendLine(header); sb.AppendLine(); }
-            sb.AppendLine("🧾 *Sale Confirmation*");
-            sb.AppendLine("━━━━━━━━━━━━━━━━━━");
-            sb.AppendLine();
-            sb.AppendLine($"👤 *Client:* {customerName}");
-            sb.AppendLine($"📅 *Date:* {saleDate:dddd, MMMM d, yyyy}");
-            sb.AppendLine($"🧾 *Invoice:* {invoiceNumber}");
-            sb.AppendLine();
-            sb.AppendLine("*Services:*");
-            foreach (var l in lines)
-                sb.AppendLine($"• {l.ItemEnName} — {l.StaffEnName} — " +
-                              $"{FormatTimeEn(l.StartTime)}–{FormatTimeEn(l.EndTime)} — " +
-                              $"{currency} {l.SalePrice:F2}");
-            sb.AppendLine();
-            sb.AppendLine($"💰 *Total:* {currency} {total:F2}");
-            if (walletAmount > 0)
-                sb.AppendLine($"👛 *Wallet:* {currency} {walletAmount:F2}");
-            sb.AppendLine($"✅ *Paid:* {currency} {paid:F2}");
+
             decimal rem = Math.Max(0m, total - paid);
-            if (rem > 0) sb.AppendLine($"⚠ *Remaining:* {currency} {rem:F2}");
-            sb.AppendLine();
+            string services = string.Join(", ", lines.Select(l => l.ItemEnName));
+
+            sb.AppendLine(rem > 0 ? "✅ Deposit received successfully" : "✅ Payment received successfully");
             sb.AppendLine("━━━━━━━━━━━━━━━━━━");
+            sb.AppendLine($"Service: {services}");
+            sb.AppendLine($"Paid: {currency} {paid:F2}");
+            sb.AppendLine($"Total: {currency} {total:F2}");
+            if (rem > 0) sb.AppendLine($"Remaining: {currency} {rem:F2}");
+            sb.AppendLine($"📄 Invoice: {pdfUrl}");
+            sb.AppendLine("━━━━━━━━━━━━━━━━━━");
+            sb.AppendLine(rem > 0 ? "Thank you! The remaining balance is due on arrival." : "Thank you!");
+
             if (!string.IsNullOrWhiteSpace(footer)) { sb.AppendLine(); sb.AppendLine(footer); }
             return sb.ToString();
         }
@@ -955,35 +953,26 @@ namespace PosDashboard.Web.Modules.System
         private static string BuildSaleMessageAr(
             string header, string footer, string customerName, DateTime saleDate,
             string invoiceNumber, List<ResolvedLine> lines,
-            decimal total, decimal paid, decimal walletAmount, string currencyAr)
+            decimal total, decimal paid, decimal walletAmount, string currencyAr,
+            string pdfUrl)
         {
             var sb = new StringBuilder();
             if (!string.IsNullOrWhiteSpace(header)) { sb.AppendLine(header); sb.AppendLine(); }
-            sb.AppendLine("🧾 *تأكيد عملية بيع*");
-            sb.AppendLine("━━━━━━━━━━━━━━━━━━");
-            sb.AppendLine();
-            sb.AppendLine($"👤 *العميل:* {customerName}");
-            sb.AppendLine($"📅 *التاريخ:* {FormatDateAr(saleDate)}");
-            sb.AppendLine($"🧾 *الفاتورة:* {invoiceNumber}");
-            sb.AppendLine();
-            sb.AppendLine("*الخدمات:*");
-            foreach (var l in lines)
-            {
-                var itm = string.IsNullOrWhiteSpace(l.ItemArName) ? l.ItemEnName : l.ItemArName;
-                var stf = string.IsNullOrWhiteSpace(l.StaffArName) ? l.StaffEnName : l.StaffArName;
-                sb.AppendLine($"• {itm} — {stf} — " +
-                              $"{FormatTimeAr(l.StartTime)}–{FormatTimeAr(l.EndTime)} — " +
-                              $"{l.SalePrice:F2} {currencyAr}");
-            }
-            sb.AppendLine();
-            sb.AppendLine($"💰 *الإجمالي:* {total:F2} {currencyAr}");
-            if (walletAmount > 0)
-                sb.AppendLine($"👛 *المحفظة:* {walletAmount:F2} {currencyAr}");
-            sb.AppendLine($"✅ *المدفوع:* {paid:F2} {currencyAr}");
+
             decimal rem = Math.Max(0m, total - paid);
-            if (rem > 0) sb.AppendLine($"⚠ *المتبقي:* {rem:F2} {currencyAr}");
-            sb.AppendLine();
+            string services = string.Join("، ",
+                lines.Select(l => string.IsNullOrWhiteSpace(l.ItemArName) ? l.ItemEnName : l.ItemArName));
+
+            sb.AppendLine(rem > 0 ? "✅ تم استلام الدفعة المقدمة بنجاح" : "✅ تم استلام الدفع بنجاح");
             sb.AppendLine("━━━━━━━━━━━━━━━━━━");
+            sb.AppendLine($"الخدمة: {services}");
+            sb.AppendLine($"المبلغ المدفوع: {paid:F2} {currencyAr}");
+            sb.AppendLine($"السعر الكلي: {total:F2} {currencyAr}");
+            if (rem > 0) sb.AppendLine($"المتبقي: {rem:F2} {currencyAr}");
+            sb.AppendLine($"📄 الفاتورة: {pdfUrl}");
+            sb.AppendLine("━━━━━━━━━━━━━━━━━━");
+            sb.AppendLine(rem > 0 ? "شكراً لكم! المبلغ المتبقي يُسدَّد عند الحضور." : "شكراً لكم!");
+
             if (!string.IsNullOrWhiteSpace(footer)) { sb.AppendLine(); sb.AppendLine(footer); }
             return sb.ToString();
         }
@@ -1011,7 +1000,114 @@ namespace PosDashboard.Web.Modules.System
                                  "يوليو","أغسطس","سبتمبر","أكتوبر","نوفمبر","ديسمبر" };
             return $"{days[(int)dt.DayOfWeek]}، {dt.Day} {months[dt.Month]} {dt.Year}";
         }
+        private void GenerateAndStoreInvoicePdf(IDbConnection conn, int appointmentId, string? paymentMethod = null)
+        {
+            try
+            {
+                var head = conn.Query<dynamic>(@"
+            SELECT TOP 1
+                inv.Id              AS InvoiceId,
+                inv.InvoiceNumber   AS InvoiceNumber,
+                inv.TotalAmount     AS TotalAmount,
+                inv.PaidAmount      AS PaidAmount,
+                inv.RemainingAmount AS RemainingAmount,
+                c.CUSTOMER_NAME     AS CustomerName,
+                c.CUSTOMER_PHONE1   AS CustomerPhone,
+                a.Notes             AS Notes,
+                b.EnglishCurrencyName, b.ArabicCurrencyName
+            FROM dbo.AppointmentInvoices inv
+            INNER JOIN dbo.AppointmentData a ON a.Id = inv.AppointmentId
+            INNER JOIN dbo.CUSTOMER c        ON c.CUSTOMER_ID = a.CustomerId
+            LEFT  JOIN dbo.BRANCH b          ON b.BRANCH_ID   = a.BranchId
+            WHERE inv.AppointmentId = @Id",
+                    new { Id = appointmentId }).FirstOrDefault();
 
+                if (head == null) return;
+
+                var companyInfo = conn.Query<dynamic>(@"
+            SELECT TOP 1
+                COMPANY_NAME1, COMPANY_NAME2, COMPANY_ADRESS1, COMPANY_PHONE, COMPANY_LOGO,
+                FOOTER, FOOTER1, FOOTER2
+            FROM dbo.COMPANY ORDER BY COMPANY_ID").FirstOrDefault();
+
+                int invoiceId = (int)head.InvoiceId;
+                string currency = (string)(head.EnglishCurrencyName ?? "KWD");
+                string currencyAr = (string)(head.ArabicCurrencyName ?? "د.ك");
+                string invoiceNumber = (string?)head.InvoiceNumber
+                    ?? $"INV-{DateTime.UtcNow:yyyyMMdd}-{appointmentId}";
+                decimal total = (decimal)head.TotalAmount;
+                decimal paid = (decimal)head.PaidAmount;
+
+                var pdfData = new InvoicePdfData
+                {
+                    InvoiceNumber = invoiceNumber,
+                    InvoiceDate = DateTime.UtcNow,
+                    CustomerName = (string)head.CustomerName,
+                    CustomerPhone = (string)head.CustomerPhone,
+                    Currency = currency,
+                    CurrencyAr = currencyAr,
+                    TotalAmount = total,
+                    PaidAmount = paid,
+                    RemainingAmount = Math.Max(0, total - paid),
+                    PaymentMethod = paymentMethod ?? "—",
+                    PaymentStatus = paid >= total ? "Paid" : "Deposit Paid",
+                    Notes = (string?)head.Notes,
+
+                    SalonName = (string?)(companyInfo?.COMPANY_NAME1) ?? "Salon",
+                    SalonNameAr = (string?)(companyInfo?.COMPANY_NAME2) ?? "",
+                    SalonAddress = (string?)(companyInfo?.COMPANY_ADRESS1) ?? "",
+                    SalonPhone = (string?)(companyInfo?.COMPANY_PHONE) ?? "",
+                    SalonLogoUrl = companyInfo?.COMPANY_LOGO != null
+                        ? (((string)companyInfo.COMPANY_LOGO).StartsWith("http")
+                            ? (string)companyInfo.COMPANY_LOGO
+                            : $"{Request.Scheme}://{Request.Host}{companyInfo.COMPANY_LOGO}")
+                        : null,
+                    FooterLine1 = (string?)(companyInfo?.FOOTER),
+                    FooterLine2 = (string?)(companyInfo?.FOOTER1),
+                    FooterLine3 = (string?)(companyInfo?.FOOTER2),
+
+                    LineItems = new List<InvoiceLineData>()
+                };
+
+                // كل سطور البيع من AppointmentInvoiceLines (يدعم تعدد الخدمات)
+                var lines = conn.Query<dynamic>(@"
+            SELECT
+                i.ITEM_NAME1 AS ItemEn, i.ITEM_NAME2 AS ItemAr,
+                s.EnglishName AS StaffEn, s.ArabicName AS StaffAr,
+                ail.DiscountedUnitPrice AS UnitPrice,
+                ail.TotalPrice          AS TotalPrice
+            FROM dbo.AppointmentInvoiceLines ail
+            INNER JOIN dbo.ITEM  i ON i.ITEM_ID = ail.ItemId
+            INNER JOIN dbo.STAFF s ON s.Id      = ail.StaffId
+            WHERE ail.InvoiceId = @InvoiceId AND ISNULL(ail.IsRefunded, 0) = 0
+            ORDER BY ail.Id",
+                    new { InvoiceId = invoiceId }).ToList();
+
+                foreach (var ln in lines)
+                {
+                    pdfData.LineItems.Add(new InvoiceLineData
+                    {
+                        ItemName = (string)(ln.ItemEn ?? ln.ItemAr ?? "Service"),
+                        StaffName = (string)(ln.StaffEn ?? ln.StaffAr ?? ""),
+                        Quantity = 1,
+                        UnitPrice = (decimal)ln.UnitPrice,
+                        TotalPrice = (decimal)ln.TotalPrice
+                    });
+                }
+
+                byte[] pdfBytes = PdfInvoiceService.GenerateInvoicePdf(pdfData);
+                string fileName = $"Invoice_{invoiceNumber}_{appointmentId}.pdf";
+
+                SqlMapper.Execute(conn, @"
+            INSERT INTO dbo.INVOICE_PDF (AppointmentId, TransactionId, FileName, PdfData, CreatedAt)
+            VALUES (@AppointmentId, NULL, @FileName, @PdfData, SYSUTCDATETIME())",
+                    new { AppointmentId = appointmentId, FileName = fileName, PdfData = pdfBytes });
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[NewSale PDF] {ex.Message}");
+            }
+        }
         private static string NormalizePhone(string phone)
         {
             if (string.IsNullOrWhiteSpace(phone)) return "";

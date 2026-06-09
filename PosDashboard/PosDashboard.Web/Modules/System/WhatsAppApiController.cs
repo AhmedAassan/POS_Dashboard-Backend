@@ -665,55 +665,38 @@ namespace PosDashboard.Web.Modules.System
             var sb = new StringBuilder();
             if (!string.IsNullOrWhiteSpace(header)) { sb.AppendLine(header); sb.AppendLine(); }
 
+            decimal rem = (decimal)invoice.RemainingAmount;
+            string pdfUrl = $"{Request.Scheme}://{Request.Host}/api/myfatoorah/invoice-pdf/{(int)invoice.AppointmentId}";
+            string services = string.Join(lang == "en" ? ", " : "، ",
+                lines.Select(l => lang == "en"
+                    ? (string)(l.ItemEn ?? l.ItemAr ?? "")
+                    : (string)(l.ItemAr ?? l.ItemEn ?? "")));
+
             if (lang == "en")
             {
-                sb.AppendLine("🧾 *Sale Confirmation*");
+                sb.AppendLine(rem > 0 ? "✅ Deposit received successfully" : "✅ Payment received successfully");
                 sb.AppendLine("━━━━━━━━━━━━━━━━━━");
-                sb.AppendLine();
-                sb.AppendLine($"👤 *Client:* {(string)invoice.CustomerName}");
-                sb.AppendLine($"📅 *Date:* {((DateTime)invoice.AppointmentDate):dddd, MMMM d, yyyy}");
-                sb.AppendLine($"🧾 *Invoice:* {(string)invoice.InvoiceNumber}");
-                sb.AppendLine();
-                sb.AppendLine("*Services:*");
-                foreach (var l in lines)
-                {
-                    sb.AppendLine(
-                        $"• {(string)(l.ItemEn ?? l.ItemAr ?? "")} — {(string)(l.StaffEn ?? l.StaffAr ?? "")} — " +
-                        $"{((TimeSpan)l.StartTime):hh\\:mm}–{((TimeSpan)l.EndTime):hh\\:mm} — " +
-                        $"{currency} {((decimal)l.Price):F2}");
-                }
-                sb.AppendLine();
-                sb.AppendLine($"💰 *Total:* {currency} {((decimal)invoice.TotalAmount):F2}");
-                sb.AppendLine($"✅ *Paid:* {currency} {((decimal)invoice.PaidAmount):F2}");
-                if ((decimal)invoice.RemainingAmount > 0)
-                    sb.AppendLine($"⚠ *Remaining:* {currency} {((decimal)invoice.RemainingAmount):F2}");
+                sb.AppendLine($"Service: {services}");
+                sb.AppendLine($"Paid: {currency} {((decimal)invoice.PaidAmount):F2}");
+                sb.AppendLine($"Total: {currency} {((decimal)invoice.TotalAmount):F2}");
+                if (rem > 0) sb.AppendLine($"Remaining: {currency} {rem:F2}");
+                sb.AppendLine($"📄 Invoice: {pdfUrl}");
+                sb.AppendLine("━━━━━━━━━━━━━━━━━━");
+                sb.AppendLine(rem > 0 ? "Thank you! The remaining balance is due on arrival." : "Thank you!");
             }
             else
             {
-                sb.AppendLine("🧾 *تأكيد عملية بيع*");
+                sb.AppendLine(rem > 0 ? "✅ تم استلام الدفعة المقدمة بنجاح" : "✅ تم استلام الدفع بنجاح");
                 sb.AppendLine("━━━━━━━━━━━━━━━━━━");
-                sb.AppendLine();
-                sb.AppendLine($"👤 *العميل:* {(string)invoice.CustomerName}");
-                sb.AppendLine($"📅 *التاريخ:* {((DateTime)invoice.AppointmentDate):yyyy/MM/dd}");
-                sb.AppendLine($"🧾 *الفاتورة:* {(string)invoice.InvoiceNumber}");
-                sb.AppendLine();
-                sb.AppendLine("*الخدمات:*");
-                foreach (var l in lines)
-                {
-                    sb.AppendLine(
-                        $"• {(string)(l.ItemAr ?? l.ItemEn ?? "")} — {(string)(l.StaffAr ?? l.StaffEn ?? "")} — " +
-                        $"{((TimeSpan)l.StartTime):hh\\:mm}–{((TimeSpan)l.EndTime):hh\\:mm} — " +
-                        $"{((decimal)l.Price):F2} {currency}");
-                }
-                sb.AppendLine();
-                sb.AppendLine($"💰 *الإجمالي:* {((decimal)invoice.TotalAmount):F2} {currency}");
-                sb.AppendLine($"✅ *المدفوع:* {((decimal)invoice.PaidAmount):F2} {currency}");
-                if ((decimal)invoice.RemainingAmount > 0)
-                    sb.AppendLine($"⚠ *المتبقي:* {((decimal)invoice.RemainingAmount):F2} {currency}");
+                sb.AppendLine($"الخدمة: {services}");
+                sb.AppendLine($"المبلغ المدفوع: {((decimal)invoice.PaidAmount):F2} {currency}");
+                sb.AppendLine($"السعر الكلي: {((decimal)invoice.TotalAmount):F2} {currency}");
+                if (rem > 0) sb.AppendLine($"المتبقي: {rem:F2} {currency}");
+                sb.AppendLine($"📄 الفاتورة: {pdfUrl}");
+                sb.AppendLine("━━━━━━━━━━━━━━━━━━");
+                sb.AppendLine(rem > 0 ? "شكراً لكم! المبلغ المتبقي يُسدَّد عند الحضور." : "شكراً لكم!");
             }
 
-            sb.AppendLine();
-            sb.AppendLine("━━━━━━━━━━━━━━━━━━");
             if (!string.IsNullOrWhiteSpace(footer)) { sb.AppendLine(); sb.AppendLine(footer); }
 
             string message = sb.ToString();
@@ -746,6 +729,95 @@ namespace PosDashboard.Web.Modules.System
             }
         }
 
+        // POST /api/whatsapp/send-session-served
+        [HttpPost("send-session-served")]
+        public async Task<ActionResult<ApiResult<SendWhatsAppResponse>>> SendSessionServed(
+            [FromBody] int customerPackageSessionId)
+        {
+            using var conn = sqlConnections.NewByKey("Default");
+
+            var config = conn.Query<dynamic>(@"
+        SELECT TOP 1 HeaderText, FooterText, InstanceId, IsEnabled
+        FROM dbo.WHATSAPP_CONFIG ORDER BY Id").FirstOrDefault();
+            if (config == null || !(bool)config.IsEnabled)
+                return Ok(new ApiResult<SendWhatsAppResponse>(true, null,
+                    new SendWhatsAppResponse(false, "", "WhatsApp sending is disabled")));
+
+            var info = conn.Query<dynamic>(@"
+        SELECT 
+            c.CUSTOMER_NAME   AS CustomerName,
+            c.CUSTOMER_PHONE1 AS CustomerPhone,
+            ISNULL(c.NotificationLang,'ar') AS Lang,
+            p.ArabicName  AS PkgAr, p.EnglishName AS PkgEn,
+            (SELECT COUNT(*) FROM dbo.CustomerPackageSessions x
+               WHERE x.CustomerPackageId = cp.Id AND ISNULL(x.Deleted,0)=0) AS Total,
+            (SELECT COUNT(*) FROM dbo.CustomerPackageSessions x
+               WHERE x.CustomerPackageId = cp.Id AND ISNULL(x.Deleted,0)=0 AND ISNULL(x.Served,0)=1) AS Used,
+            (SELECT COUNT(*) FROM dbo.CustomerPackageSessions x
+               WHERE x.CustomerPackageId = cp.Id AND ISNULL(x.Deleted,0)=0 AND ISNULL(x.Served,0)=0) AS Remaining
+        FROM dbo.CustomerPackageSessions s
+        INNER JOIN dbo.CustomerPackages cp ON cp.Id = s.CustomerPackageId
+        INNER JOIN dbo.Packages p          ON p.Id  = cp.PackageId
+        INNER JOIN dbo.CUSTOMER c          ON c.CUSTOMER_REF_GUIDE = cp.CustomerRef
+        WHERE s.Id = @Id",
+                new { Id = customerPackageSessionId }).FirstOrDefault();
+
+            if (info == null)
+                return Ok(new ApiResult<SendWhatsAppResponse>(false, "Session not found", null));
+
+            string header = (string?)config.HeaderText ?? "";
+            string footer = (string?)config.FooterText ?? "";
+            string instanceId = (string?)config.InstanceId ?? "51d2e384a1ef86b";
+            string lang = (string)info.Lang;
+            string pkg = lang == "en" ? (string)(info.PkgEn ?? "") : (string)(info.PkgAr ?? "");
+            int total = (int)info.Total, used = (int)info.Used, remaining = (int)info.Remaining;
+
+            var sb = new StringBuilder();
+            if (!string.IsNullOrWhiteSpace(header)) { sb.AppendLine(header); sb.AppendLine(); }
+            if (lang == "en")
+            {
+                sb.AppendLine("✅ A session from your package has been used");
+                sb.AppendLine("━━━━━━━━━━━━━━━━━━");
+                sb.AppendLine($"Package: {pkg}");
+                sb.AppendLine($"Used sessions: {used} of {total}");
+                sb.AppendLine($"Remaining sessions: {remaining}");
+                sb.AppendLine("━━━━━━━━━━━━━━━━━━");
+                sb.AppendLine("Thank you for your visit!");
+            }
+            else
+            {
+                sb.AppendLine("✅ تم استخدام جلسة من باقتك");
+                sb.AppendLine("━━━━━━━━━━━━━━━━━━");
+                sb.AppendLine($"الباقة: {pkg}");
+                sb.AppendLine($"الجلسات المستخدمة: {used} من {total}");
+                sb.AppendLine($"الجلسات المتبقية: {remaining}");
+                sb.AppendLine("━━━━━━━━━━━━━━━━━━");
+                sb.AppendLine("شكراً لزيارتكم!");
+            }
+            if (!string.IsNullOrWhiteSpace(footer)) { sb.AppendLine(); sb.AppendLine(footer); }
+
+            string message = sb.ToString();
+            string phone = NormalizePhone((string)info.CustomerPhone);
+
+            try
+            {
+                var client = httpClientFactory.CreateClient();
+                client.DefaultRequestHeaders.Authorization =
+                    new AuthenticationHeaderValue("Bearer", _configuration["WhatsApp:ApiKey"] ?? "");
+                var payload = new { instance_id = instanceId, message, number = phone };
+                var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+                var resp = await client.PostAsync(EnjazatikUrl, content);
+                if (resp.IsSuccessStatusCode)
+                    return Ok(new ApiResult<SendWhatsAppResponse>(true, null, new SendWhatsAppResponse(true, phone, null)));
+                var body = await resp.Content.ReadAsStringAsync();
+                return Ok(new ApiResult<SendWhatsAppResponse>(true, null, new SendWhatsAppResponse(false, phone, $"API error: {resp.StatusCode} — {body}")));
+            }
+            catch (Exception ex)
+            {
+                return Ok(new ApiResult<SendWhatsAppResponse>(true, null, new SendWhatsAppResponse(false, phone, $"Send failed: {ex.Message}")));
+            }
+        }
+
         #region Private Helpers
 
         private static string BuildPackageAssignmentArabicMessage(
@@ -766,7 +838,6 @@ namespace PosDashboard.Web.Modules.System
             sb.AppendLine("🎁 *تأكيد الباقة*");
             sb.AppendLine("━━━━━━━━━━━━━━━━━━");
             sb.AppendLine();
-            sb.AppendLine($"👤 *العميل:* {customerName}");
             sb.AppendLine($"📦 *الباقة:* {packageName}");
             sb.AppendLine($"💰 *القيمة:* {amount:F2} {currency}");
             sb.AppendLine($"🎯 *إجمالي الجلسات:* {totalSessions}");
@@ -804,7 +875,6 @@ namespace PosDashboard.Web.Modules.System
             sb.AppendLine("🎁 *Package Confirmation*");
             sb.AppendLine("━━━━━━━━━━━━━━━━━━");
             sb.AppendLine();
-            sb.AppendLine($"👤 *Client:* {customerName}");
             sb.AppendLine($"📦 *Package:* {packageName}");
             sb.AppendLine($"💰 *Value:* {currency} {amount:F2}");
             sb.AppendLine($"🎯 *Total Sessions:* {totalSessions}");
@@ -824,12 +894,12 @@ namespace PosDashboard.Web.Modules.System
             return sb.ToString();
         }
         private static string BuildArabicMessageWithPaymentLink(
-        string header, string footer,
-        string customerName, string serviceName, string staffName,
-        string dateStr, string startTime, string endTime,
-        int persons, string serviceType,
-        decimal price, string currency, string? notes,
-        string paymentLink)
+string header, string footer,
+string customerName, string serviceName, string staffName,
+string dateStr, string startTime, string endTime,
+int persons, string serviceType,
+decimal price, string currency, string? notes,
+string paymentLink)
         {
             var sb = new StringBuilder();
 
@@ -842,21 +912,20 @@ namespace PosDashboard.Web.Modules.System
             sb.AppendLine("📋 *تأكيد الموعد*");
             sb.AppendLine("━━━━━━━━━━━━━━━━━━");
             sb.AppendLine();
-            sb.AppendLine($"👤 *العميل:* {customerName}");
-            sb.AppendLine($"💇 *الخدمة:* {serviceName}");
-            sb.AppendLine($"👩‍💼 *المختص/ة:* {staffName}");
-            sb.AppendLine($"📅 *التاريخ:* {FormatDateArabic(dateStr)}");
-            sb.AppendLine($"🕐 *الوقت:* {FormatTimeArabic(startTime)} – {FormatTimeArabic(endTime)}");
+            sb.AppendLine($"*الخدمة:* {serviceName}");
+            sb.AppendLine($"*المختص/ة:* {staffName}");
+            sb.AppendLine($"*التاريخ:* {FormatDateArabic(dateStr)}");
+            sb.AppendLine($"*الوقت:* {FormatTimeArabic(startTime)} – {FormatTimeArabic(endTime)}");
 
             if (serviceType == "HOME")
-                sb.AppendLine("📍 *النوع:* 🏠 خدمة منزلية");
+                sb.AppendLine("*النوع:* خدمة منزلية");
             else
-                sb.AppendLine("📍 *النوع:* 💈 في الصالون");
+                sb.AppendLine("*النوع:* في الصالون");
 
             if (persons > 1)
                 sb.AppendLine($"👥 *عدد الأشخاص:* {persons}");
 
-            sb.AppendLine($"💰 *السعر:* {price:F2} {currency}");
+            sb.AppendLine($"*السعر:* {price:F2} {currency}");
 
             if (!string.IsNullOrWhiteSpace(notes))
             {
@@ -882,12 +951,12 @@ namespace PosDashboard.Web.Modules.System
         }
 
         private static string BuildEnglishMessageWithPaymentLink(
-            string header, string footer,
-            string customerName, string serviceName, string staffName,
-            string dateStr, string startTime, string endTime,
-            int persons, string serviceType,
-            decimal price, string currency, string? notes,
-            string paymentLink)
+    string header, string footer,
+    string customerName, string serviceName, string staffName,
+    string dateStr, string startTime, string endTime,
+    int persons, string serviceType,
+    decimal price, string currency, string? notes,
+    string paymentLink)
         {
             var sb = new StringBuilder();
 
@@ -900,21 +969,20 @@ namespace PosDashboard.Web.Modules.System
             sb.AppendLine("📋 *Appointment Confirmation*");
             sb.AppendLine("━━━━━━━━━━━━━━━━━━");
             sb.AppendLine();
-            sb.AppendLine($"👤 *Client:* {customerName}");
-            sb.AppendLine($"💇 *Service:* {serviceName}");
-            sb.AppendLine($"👩‍💼 *Specialist:* {staffName}");
-            sb.AppendLine($"📅 *Date:* {FormatDateEnglish(dateStr)}");
-            sb.AppendLine($"🕐 *Time:* {FormatTimeEnglish(startTime)} – {FormatTimeEnglish(endTime)}");
+            sb.AppendLine($"*Service:* {serviceName}");
+            sb.AppendLine($"*Specialist:* {staffName}");
+            sb.AppendLine($"*Date:* {FormatDateEnglish(dateStr)}");
+            sb.AppendLine($"*Time:* {FormatTimeEnglish(startTime)} – {FormatTimeEnglish(endTime)}");
 
             if (serviceType == "HOME")
-                sb.AppendLine("📍 *Type:* 🏠 Home Service");
+                sb.AppendLine("*Type:* Home Service");
             else
-                sb.AppendLine("📍 *Type:* 💈 Salon");
+                sb.AppendLine("*Type:* Salon");
 
             if (persons > 1)
                 sb.AppendLine($"👥 *Persons:* {persons}");
 
-            sb.AppendLine($"💰 *Price:* {currency} {price:F2}");
+            sb.AppendLine($"*Price:* {currency} {price:F2}");
 
             if (!string.IsNullOrWhiteSpace(notes))
             {
@@ -939,12 +1007,12 @@ namespace PosDashboard.Web.Modules.System
             return sb.ToString();
         }
         private static string BuildArabicMessage(
-            string header, string footer,
-            string customerName, string serviceName, string staffName,
-            string dateStr, string startTime, string endTime,
-            int persons, string serviceType,
-            decimal price, string currency, string? notes, string? packageName,
-            int remainingSessions = 0, int servedSessions = 0, int totalSessions = 0)
+    string header, string footer,
+    string customerName, string serviceName, string staffName,
+    string dateStr, string startTime, string endTime,
+    int persons, string serviceType,
+    decimal price, string currency, string? notes, string? packageName,
+    int remainingSessions = 0, int servedSessions = 0, int totalSessions = 0)
         {
             var sb = new StringBuilder();
 
@@ -957,16 +1025,15 @@ namespace PosDashboard.Web.Modules.System
             sb.AppendLine("📋 *تأكيد الموعد*");
             sb.AppendLine("━━━━━━━━━━━━━━━━━━");
             sb.AppendLine();
-            sb.AppendLine($"👤 *العميل:* {customerName}");
-            sb.AppendLine($"💇 *الخدمة:* {serviceName}");
-            sb.AppendLine($"👩‍💼 *المختص/ة:* {staffName}");
-            sb.AppendLine($"📅 *التاريخ:* {FormatDateArabic(dateStr)}");
-            sb.AppendLine($"🕐 *الوقت:* {FormatTimeArabic(startTime)} – {FormatTimeArabic(endTime)}");
+            sb.AppendLine($"*الخدمة:* {serviceName}");
+            sb.AppendLine($"*المختص/ة:* {staffName}");
+            sb.AppendLine($"*التاريخ:* {FormatDateArabic(dateStr)}");
+            sb.AppendLine($"*الوقت:* {FormatTimeArabic(startTime)} – {FormatTimeArabic(endTime)}");
 
             if (serviceType == "HOME")
-                sb.AppendLine("📍 *النوع:* 🏠 خدمة منزلية");
+                sb.AppendLine("*النوع:* خدمة منزلية");
             else
-                sb.AppendLine("📍 *النوع:* 💈 في الصالون");
+                sb.AppendLine("*النوع:* في الصالون");
 
             if (persons > 1)
                 sb.AppendLine($"👥 *عدد الأشخاص:* {persons}");
@@ -985,7 +1052,7 @@ namespace PosDashboard.Web.Modules.System
             }
             else
             {
-                sb.AppendLine($"💰 *السعر:* {price:F2} {currency}");
+                sb.AppendLine($"*السعر:* {price:F2} {currency}");
             }
 
             if (!string.IsNullOrWhiteSpace(notes))
@@ -1007,12 +1074,12 @@ namespace PosDashboard.Web.Modules.System
         }
 
         private static string BuildEnglishMessage(
-            string header, string footer,
-            string customerName, string serviceName, string staffName,
-            string dateStr, string startTime, string endTime,
-            int persons, string serviceType,
-            decimal price, string currency, string? notes, string? packageName,
-            int remainingSessions = 0, int servedSessions = 0, int totalSessions = 0)
+    string header, string footer,
+    string customerName, string serviceName, string staffName,
+    string dateStr, string startTime, string endTime,
+    int persons, string serviceType,
+    decimal price, string currency, string? notes, string? packageName,
+    int remainingSessions = 0, int servedSessions = 0, int totalSessions = 0)
         {
             var sb = new StringBuilder();
 
@@ -1025,16 +1092,15 @@ namespace PosDashboard.Web.Modules.System
             sb.AppendLine("📋 *Appointment Confirmation*");
             sb.AppendLine("━━━━━━━━━━━━━━━━━━");
             sb.AppendLine();
-            sb.AppendLine($"👤 *Client:* {customerName}");
-            sb.AppendLine($"💇 *Service:* {serviceName}");
-            sb.AppendLine($"👩‍💼 *Specialist:* {staffName}");
-            sb.AppendLine($"📅 *Date:* {FormatDateEnglish(dateStr)}");
-            sb.AppendLine($"🕐 *Time:* {FormatTimeEnglish(startTime)} – {FormatTimeEnglish(endTime)}");
+            sb.AppendLine($"*Service:* {serviceName}");
+            sb.AppendLine($"*Specialist:* {staffName}");
+            sb.AppendLine($"*Date:* {FormatDateEnglish(dateStr)}");
+            sb.AppendLine($"*Time:* {FormatTimeEnglish(startTime)} – {FormatTimeEnglish(endTime)}");
 
             if (serviceType == "HOME")
-                sb.AppendLine("📍 *Type:* 🏠 Home Service");
+                sb.AppendLine("*Type:* Home Service");
             else
-                sb.AppendLine("📍 *Type:* 💈 Salon");
+                sb.AppendLine("*Type:* Salon");
 
             if (persons > 1)
                 sb.AppendLine($"👥 *Persons:* {persons}");
@@ -1053,7 +1119,7 @@ namespace PosDashboard.Web.Modules.System
             }
             else
             {
-                sb.AppendLine($"💰 *Price:* {currency} {price:F2}");
+                sb.AppendLine($"*Price:* {currency} {price:F2}");
             }
 
             if (!string.IsNullOrWhiteSpace(notes))

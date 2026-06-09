@@ -756,7 +756,8 @@ namespace PosDashboard.Web.Modules.System
         WHERE s.Deleted = 0
           AND s.Active  = 1
           AND s.BranchId = @BranchId"
-                + (makeupOnly ? "\n  AND s.IsMakeupArtist = 1" : "")
+                + (makeupOnly ? "\n  AND s.IsMakeupArtist = 1"
+              : "\n  AND ISNULL(s.IsMakeupArtist, 0) = 0")
                 + "\nORDER BY s.EnglishName";
 
             var staffRows = conn.Query<dynamic>(staffSql,
@@ -1470,13 +1471,13 @@ namespace PosDashboard.Web.Modules.System
             // ── Send WhatsApp notifications (fire-and-forget) ─────────────────────
             // حفظ الـ appointmentId في variable محلي منفصل
             var aptIdForWa = appointmentId;
+            var paymentUrlForWa = paymentUrl;
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    // افتح connection جديدة مستقلة داخل الـ Task
                     using var waConn = sqlConnections.NewByKey("Default");
-                    await SendBookingWhatsAppAsync(aptIdForWa, waConn);
+                    await SendBookingWhatsAppAsync(aptIdForWa, waConn, paymentUrlForWa);
                 }
                 catch (Exception ex)
                 {
@@ -2107,31 +2108,26 @@ namespace PosDashboard.Web.Modules.System
         // ══════════════════════════════════════════════════════════════
         // WhatsApp: Send a notification to Staff and Admin when a booking is created
         // ══════════════════════════════════════════════════════════════
-        private async Task SendBookingWhatsAppAsync(int appointmentId, IDbConnection conn)
+        private async Task SendBookingWhatsAppAsync(int appointmentId, IDbConnection conn, string? paymentUrl = null)
         {
-            // ── 1. جلب تفاصيل الحجز ──────────────────────────────────
             var apt = conn.Query<dynamic>(@"
         SELECT
-            a.Id,
-            a.AppointmentDate,
+            a.Id, a.AppointmentDate,
             LEFT(CONVERT(VARCHAR(8), a.StartTime, 108), 5) AS StartTime,
             LEFT(CONVERT(VARCHAR(8), a.EndTime,   108), 5) AS EndTime,
-            a.ServiceType,
-            a.TotalPrice,
-            a.Notes,
-            c.CUSTOMER_NAME  AS CustomerName,
+            a.ServiceType, a.TotalPrice, a.Notes,
+            c.CUSTOMER_NAME   AS CustomerName,
             c.CUSTOMER_PHONE1 AS CustomerPhone,
-            s.ArabicName     AS StaffArabicName,
-            s.EnglishName    AS StaffEnglishName,
-            s.Mobile         AS StaffMobile,
-            b.BRANCH_NAME1   AS BranchName,
-            i.ITEM_NAME1     AS ServiceNameEN,
-            i.ITEM_NAME2     AS ServiceNameAR
+            s.ArabicName      AS StaffArabicName,
+            s.Mobile          AS StaffMobile,
+            b.BRANCH_NAME1    AS BranchName,
+            i.ITEM_NAME1      AS ServiceNameEN,
+            i.ITEM_NAME2      AS ServiceNameAR
         FROM dbo.AppointmentData a
-        INNER JOIN dbo.CUSTOMER c  ON c.CUSTOMER_ID  = a.CustomerId
-        INNER JOIN dbo.STAFF    s  ON s.Id           = a.StaffId
-        INNER JOIN dbo.BRANCH   b  ON b.BRANCH_ID    = a.BranchId
-        INNER JOIN dbo.ITEM     i  ON i.ITEM_ID      = a.ItemId
+        INNER JOIN dbo.CUSTOMER c  ON c.CUSTOMER_ID = a.CustomerId
+        INNER JOIN dbo.STAFF    s  ON s.Id          = a.StaffId
+        INNER JOIN dbo.BRANCH   b  ON b.BRANCH_ID   = a.BranchId
+        INNER JOIN dbo.ITEM     i  ON i.ITEM_ID     = a.ItemId
         WHERE a.Id = @Id",
                 new { Id = appointmentId }).FirstOrDefault();
 
@@ -2140,7 +2136,6 @@ namespace PosDashboard.Web.Modules.System
             string waApiKey = configuration["WhatsApp:ApiKey"] ?? "";
             string waApiUrl = configuration["WhatsApp:ApiUrl"] ?? "https://api.ultramsg.com";
             string waInstance = configuration["WhatsApp:InstanceId"] ?? "";
-
             if (string.IsNullOrWhiteSpace(waApiKey)) return;
 
             string date = ((DateTime)apt.AppointmentDate).ToString("yyyy-MM-dd");
@@ -2148,52 +2143,70 @@ namespace PosDashboard.Web.Modules.System
             string endTime = (string)apt.EndTime;
             string customer = (string)apt.CustomerName;
             string custPhone = (string)apt.CustomerPhone;
-            string service = (string)apt.ServiceNameAR;
+            string service = (string)(apt.ServiceNameAR ?? apt.ServiceNameEN ?? "خدمة");
             string branch = (string)apt.BranchName;
             decimal price = (decimal)apt.TotalPrice;
-            string notes = string.IsNullOrWhiteSpace((string?)apt.Notes) ? "-" : (string)apt.Notes;
+            string notes = string.IsNullOrWhiteSpace((string?)apt.Notes) ? "" : (string)apt.Notes;
 
-            // ── 2. رسالة الـ Staff ───────────────────────────────────
-            string? staffMobile = (string?)apt.StaffMobile;
-            if (!string.IsNullOrWhiteSpace(staffMobile))
+            // ── 1) رسالة العميل (بسيطة + رابط الدفع) ──
+            if (!string.IsNullOrWhiteSpace(custPhone))
             {
-                string staffMsg =
-                    $"╔══════════════════════╗\n" +
-                    $"       📅 حجز جديد\n" +
-                    $"╚══════════════════════╝\n\n" +
-                    $"👤 العميل : {customer}\n" +
-                    $"📞 الهاتف : {custPhone}\n" +
-                    $"💆 الخدمة : {service}\n" +
-                    $"🗓️ التاريخ : {date}\n" +
-                    $"⏰ الوقت  : {startTime} - {endTime}\n" +
-                    $"🏠 الفرع  : {branch}\n" +
-                    $"💰 السعر  : {price} KWD\n" +
-                    (notes == "-" ? "" : $"📝 ملاحظات : {notes}\n");
-
-                await SendWhatsAppMessageAsync(waApiUrl, waInstance, waApiKey, staffMobile, staffMsg);
+                var cb = new StringBuilder();
+                cb.AppendLine("✅ تم استلام حجزك");
+                cb.AppendLine("━━━━━━━━━━━━━━━━━━");
+                cb.AppendLine($"الخدمة: {service}");
+                cb.AppendLine($"التاريخ: {date}");
+                cb.AppendLine($"الوقت: {startTime} - {endTime}");
+                cb.AppendLine($"السعر: {price:F2} د.ك");
+                if (!string.IsNullOrWhiteSpace(paymentUrl))
+                {
+                    cb.AppendLine($"💳 رابط الدفع: {paymentUrl}");
+                    cb.AppendLine("━━━━━━━━━━━━━━━━━━");
+                    cb.AppendLine("يرجى إتمام الدفع لتأكيد الحجز.");
+                }
+                else
+                {
+                    cb.AppendLine("━━━━━━━━━━━━━━━━━━");
+                    cb.AppendLine("شكراً لحجزك معنا!");
+                }
+                await SendWhatsAppMessageAsync(waApiUrl, waInstance, waApiKey, custPhone, cb.ToString());
             }
 
-            // ── 3. رسالة الـ Admin ───────────────────────────────────
+            // ── 2) رسالة الموظف: تتبعت دلوقتي فقط لو مفيش دفع مطلوب ──
+            //     (لو فيه دفع، الموظف بياخد إشعار من الـ callback بعد تأكيد الدفع)
+            string? staffMobile = (string?)apt.StaffMobile;
+            if (string.IsNullOrWhiteSpace(paymentUrl) && !string.IsNullOrWhiteSpace(staffMobile))
+            {
+                var sb = new StringBuilder();
+                sb.AppendLine("📅 حجز جديد");
+                sb.AppendLine("━━━━━━━━━━━━━━━━━━");
+                sb.AppendLine($"العميل: {customer}");
+                sb.AppendLine($"الهاتف: {custPhone}");
+                sb.AppendLine($"الخدمة: {service}");
+                sb.AppendLine($"التاريخ: {date}");
+                sb.AppendLine($"الوقت: {startTime} - {endTime}");
+                sb.AppendLine($"السعر: {price:F2} د.ك");
+                if (notes != "") sb.AppendLine($"ملاحظات: {notes}");
+                await SendWhatsAppMessageAsync(waApiUrl, waInstance, waApiKey, staffMobile, sb.ToString());
+            }
+
+            // ── 3) رسالة الأدمن (وقت الحجز زي ما هي، بشكل مبسّط) ──
             string? adminMobile = configuration["OnlineBooking:AdminWhatsAppMobile"];
             if (!string.IsNullOrWhiteSpace(adminMobile))
             {
-                string staffName = (string)apt.StaffArabicName;
-                string adminMsg =
-                    $"╔══════════════════════╗\n" +
-                    $"   🔔 حجز أونلاين جديد\n" +
-                    $"╚══════════════════════╝\n\n" +
-                    $"👤 العميل  : {customer}\n" +
-                    $"📞 الهاتف  : {custPhone}\n" +
-                    $"💆 الخدمة  : {service}\n" +
-                    $"👩‍💼 الموظفة : {staffName}\n" +
-                    $"🗓️ التاريخ  : {date}\n" +
-                    $"⏰ الوقت   : {startTime} - {endTime}\n" +
-                    $"🏠 الفرع   : {branch}\n" +
-                    $"💰 السعر   : {price} KWD\n" +
-                    (notes == "-" ? "" : $"📝 ملاحظات : {notes}\n") +
-                    $"\n🔗 رقم الحجز: #{appointmentId}";
-
-                await SendWhatsAppMessageAsync(waApiUrl, waInstance, waApiKey, adminMobile, adminMsg);
+                var ab = new StringBuilder();
+                ab.AppendLine("🔔 حجز أونلاين جديد");
+                ab.AppendLine("━━━━━━━━━━━━━━━━━━");
+                ab.AppendLine($"العميل: {customer}");
+                ab.AppendLine($"الهاتف: {custPhone}");
+                ab.AppendLine($"الخدمة: {service}");
+                ab.AppendLine($"الموظفة: {(string)apt.StaffArabicName}");
+                ab.AppendLine($"التاريخ: {date}");
+                ab.AppendLine($"الوقت: {startTime} - {endTime}");
+                ab.AppendLine($"السعر: {price:F2} د.ك");
+                if (notes != "") ab.AppendLine($"ملاحظات: {notes}");
+                ab.AppendLine($"رقم الحجز: #{appointmentId}");
+                await SendWhatsAppMessageAsync(waApiUrl, waInstance, waApiKey, adminMobile, ab.ToString());
             }
         }
 

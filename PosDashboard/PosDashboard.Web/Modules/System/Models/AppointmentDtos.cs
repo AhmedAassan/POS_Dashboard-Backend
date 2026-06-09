@@ -217,8 +217,10 @@ namespace PosDashboard.Web.Modules.System.Models
             bool IsRefunded,
             // Display fields
             string ItemName,
+            string ItemNameAr,
             string CustomerName,
             string StaffName,
+            string StaffNameAr,
             int Quantity,
             decimal UnitPrice,
             decimal TotalPrice,
@@ -262,6 +264,7 @@ namespace PosDashboard.Web.Modules.System.Models
             decimal Amount,
             int PaymentTypeId,
             string PaymentTypeName,
+            string PaymentTypeNameAr,
             string PaymentAs,
             string? VoucherCode,
             DateTime PaidAt

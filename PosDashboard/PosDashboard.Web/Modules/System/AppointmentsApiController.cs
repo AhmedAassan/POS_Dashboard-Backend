@@ -1317,8 +1317,10 @@ namespace PosDashboard.Web.Modules.System
             ail.StaffId               AS StaffId,
             ISNULL(ail.IsRefunded, 0) AS IsRefunded,
             i.ITEM_NAME1              AS ItemName,
+            i.ITEM_NAME2  AS ItemNameAr,
             c.CUSTOMER_NAME           AS CustomerName,
             s.EnglishName             AS StaffName,
+            s.ArabicName  AS StaffNameAr,
             1                         AS Quantity,
             ail.DiscountedUnitPrice   AS UnitPrice,
             ail.TotalPrice            AS TotalPrice
@@ -1351,8 +1353,10 @@ namespace PosDashboard.Web.Modules.System
                         StaffId: (int)sl.StaffId,
                         IsRefunded: (bool)sl.IsRefunded,
                         ItemName: (string)(sl.ItemName ?? ""),
+                        ItemNameAr: (string)(sl.ItemNameAr ?? ""),
                         CustomerName: (string)(sl.CustomerName ?? ""),
                         StaffName: (string)(sl.StaffName ?? ""),
+                        StaffNameAr: (string)(sl.StaffNameAr ?? ""),
                         Quantity: (int)sl.Quantity,
                         UnitPrice: (decimal)sl.UnitPrice,
                         TotalPrice: (decimal)sl.TotalPrice,
@@ -1367,8 +1371,10 @@ namespace PosDashboard.Web.Modules.System
                 var originalItem = SqlMapper.Query(conn, @"
             SELECT 
                 i.ITEM_NAME1 AS ItemName,
+                i.ITEM_NAME2  AS ItemNameAr,
                 c.CUSTOMER_NAME AS CustomerName,
                 s.EnglishName AS StaffName,
+                s.ArabicName  AS StaffNameAr,
                 a.NumberOfPersons AS Quantity,
                 a.DiscountedUnitPrice AS UnitPrice,
                 a.DiscountedUnitPrice AS TotalPrice
@@ -1391,8 +1397,10 @@ namespace PosDashboard.Web.Modules.System
                         StaffId: null,
                         IsRefunded: false,
                         ItemName: (string)(originalItem.ItemName ?? ""),
+                        ItemNameAr: (string)(originalItem.ItemNameAr ?? ""),
                         CustomerName: (string)(originalItem.CustomerName ?? ""),
                         StaffName: (string)(originalItem.StaffName ?? ""),
+                        StaffNameAr: (string)(originalItem.StaffNameAr ?? ""),
                         Quantity: (int)originalItem.Quantity,
                         UnitPrice: (decimal)originalItem.UnitPrice,
                         TotalPrice: (decimal)originalItem.TotalPrice,
@@ -1406,8 +1414,10 @@ namespace PosDashboard.Web.Modules.System
                 ci.StaffId             AS StaffId,
                 ISNULL(ci.IsRefunded, 0) AS IsRefunded,
                 i.ITEM_NAME1 AS ItemName,
+                i.ITEM_NAME2  AS ItemNameAr,
                 c.CUSTOMER_NAME AS CustomerName,
                 s.EnglishName AS StaffName,
+                s.ArabicName  AS StaffNameAr,
                 ci.NumberOfPersons AS Quantity,
                 ci.DiscountedUnitPrice AS UnitPrice,
                 ci.TotalPrice
@@ -1431,8 +1441,10 @@ namespace PosDashboard.Web.Modules.System
                         StaffId: (int)extra.StaffId,
                         IsRefunded: (bool)extra.IsRefunded,
                         ItemName: (string)(extra.ItemName ?? ""),
+                        ItemNameAr: (string)(extra.ItemNameAr ?? ""),
                         CustomerName: (string)(extra.CustomerName ?? ""),
                         StaffName: (string)(extra.StaffName ?? ""),
+                        StaffNameAr: (string)(extra.StaffNameAr ?? ""),
                         Quantity: (int)extra.Quantity,
                         UnitPrice: (decimal)extra.UnitPrice,
                         TotalPrice: (decimal)extra.TotalPrice,
@@ -1446,6 +1458,7 @@ namespace PosDashboard.Web.Modules.System
                 SUM(ap.Amount)                AS Amount,
                 ap.PaymentTypeId,
                 pt.INVOICE_PAYMENT_TYPE_NAME1 AS PaymentTypeName,
+                pt.INVOICE_PAYMENT_TYPE_NAME2 AS PaymentTypeNameAr,
                 MAX(ap.PaymentAs)             AS PaymentAs,
                 MAX(ap.VoucherCode)           AS VoucherCode,
                 MIN(ap.PaidAt)                AS PaidAt,
@@ -1459,7 +1472,7 @@ namespace PosDashboard.Web.Modules.System
                    FROM dbo.AppointmentInvoiceLines ail
                    WHERE ail.InvoiceId = @InvoiceId
                )
-            GROUP BY ap.PaymentTypeId, pt.INVOICE_PAYMENT_TYPE_NAME1, ap.IsWalletPayment
+            GROUP BY ap.PaymentTypeId, pt.INVOICE_PAYMENT_TYPE_NAME1, pt.INVOICE_PAYMENT_TYPE_NAME2, ap.IsWalletPayment
             ORDER BY MIN(ap.PaidAt)",
                 new { AppointmentId = (int)invoice.AppointmentId, InvoiceId = invoiceId })
                 .Select(p => new AppointmentPaymentDetailDto(
@@ -1467,6 +1480,7 @@ namespace PosDashboard.Web.Modules.System
                     Amount: (decimal)p.Amount,
                     PaymentTypeId: (int)p.PaymentTypeId,
                     PaymentTypeName: (bool)p.IsWalletPayment ? "Wallet" : (string)(p.PaymentTypeName ?? ""),
+                    PaymentTypeNameAr: (bool)p.IsWalletPayment ? "محفظة" : (string)(p.PaymentTypeNameAr ?? ""),
                     PaymentAs: (string)p.PaymentAs,
                     VoucherCode: (string?)p.VoucherCode,
                     PaidAt: (DateTime)p.PaidAt
@@ -1907,6 +1921,7 @@ namespace PosDashboard.Web.Modules.System
             ap.Amount,
             ap.PaymentTypeId,
             pt.INVOICE_PAYMENT_TYPE_NAME1 AS PaymentTypeName,
+            pt.INVOICE_PAYMENT_TYPE_NAME2 AS PaymentTypeNameAr,
             ap.PaymentAs,
             ap.VoucherCode,
             ap.PaidAt,
@@ -1922,6 +1937,7 @@ namespace PosDashboard.Web.Modules.System
                     Amount: (decimal)p.Amount,
                     PaymentTypeId: (int)p.PaymentTypeId,
                     PaymentTypeName: (bool)p.IsWalletPayment ? "Wallet" : (string)(p.PaymentTypeName ?? ""),
+                    PaymentTypeNameAr: (bool)p.IsWalletPayment ? "محفظة" : (string)(p.PaymentTypeNameAr ?? ""),
                     PaymentAs: (string)p.PaymentAs,
                     VoucherCode: (string?)p.VoucherCode,
                     PaidAt: (DateTime)p.PaidAt

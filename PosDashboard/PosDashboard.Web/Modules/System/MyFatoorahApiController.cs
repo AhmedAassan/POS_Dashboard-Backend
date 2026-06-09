@@ -370,16 +370,12 @@ namespace PosDashboard.Web.Modules.System
                 int appointmentId = (int)txRow.AppointmentId;
                 decimal amount = (decimal)txRow.Amount;  // ← this is the deposit amount stored
 
-                // Update transaction
-                SqlMapper.Execute(conn, @"
-                    UPDATE dbo.MYFATOORAH_TRANSACTIONS SET
-                        PaymentId = @PaymentId,
-                        Status = @Status,
-                        PaymentMethod = @PaymentMethod,
-                        TransactionDate = SYSUTCDATETIME(),
-                        RawResponse = @RawResponse,
-                        UpdatedAt = SYSUTCDATETIME()
-                    WHERE Id = @Id",
+                // Update transaction — atomically؛ بس لو لسه مش 'paid' (يمنع تكرار المعالجة)
+                int rowsClaimed = SqlMapper.Execute(conn, @"
+                UPDATE dbo.MYFATOORAH_TRANSACTIONS SET
+                    PaymentId = @PaymentId, Status = @Status, PaymentMethod = @PaymentMethod,
+                    TransactionDate = SYSUTCDATETIME(), RawResponse = @RawResponse, UpdatedAt = SYSUTCDATETIME()
+                WHERE Id = @Id AND Status <> 'paid'",
                     new
                     {
                         Id = txId,
@@ -388,6 +384,10 @@ namespace PosDashboard.Web.Modules.System
                         PaymentMethod = paymentMethod,
                         RawResponse = responseBody
                     });
+
+                // لو كانت 'paid' خلاص ودي callback ناجحة تانية → اتعالجت قبل كده، اخرج من غير تكرار
+                if (isPaid && rowsClaimed == 0)
+                    return RedirectToFrontend("paid", appointmentId, txId, null);
 
                 if (isPaid)
                 {
@@ -456,6 +456,10 @@ namespace PosDashboard.Web.Modules.System
                                 PaymentTypeId = onlinePaymentTypeId!.Value,
                                 PaymentAs = paymentAs
                             });
+                        
+                        // إشعار الموظف بعد تأكيد الدفع (للحجوزات الأونلاين فقط)
+                        try { await SendStaffBookingNotifyAsync(conn, appointmentId); }
+                        catch (Exception ex) { Debug.WriteLine($"[Staff Notify] {ex.Message}"); }
 
                         // ← أضف ده: لو FULL، اعمل Invoice وعمل checkout
                         if (paymentAs == "FULL")
@@ -520,7 +524,7 @@ namespace PosDashboard.Web.Modules.System
 
                         try
                         {
-                            _ = SendWhatsAppInvoiceAsync(conn, appointmentId, txId);
+                            await SendWhatsAppInvoiceAsync(conn, appointmentId, txId);
                         }
                         catch (Exception waEx)
                         {
@@ -887,78 +891,76 @@ namespace PosDashboard.Web.Modules.System
                     new { Id = transactionId }).FirstOrDefault();
 
                 if (info == null) return;
-
+                // قفل ذرّي: لو اتبعت قبل كده، اخرج فوراً (يمنع الإرسال المكرر من الـ callback المزدوج)
+                int claimed = SqlMapper.Execute(conn, @"
+                UPDATE dbo.MYFATOORAH_TRANSACTIONS
+                SET WhatsAppSent = 1
+                WHERE Id = @Id AND ISNULL(WhatsAppSent, 0) = 0",
+                                new { Id = transactionId });
+                if (claimed == 0) return;
                 string customerLang = (string)info.CustomerLang;
                 string customerPhone = NormalizePhone((string)info.CustomerPhone);
                 string instanceId = (string?)waConfig.InstanceId ?? "51d2e384a1ef86b";
                 string pdfUrl = (string?)info.PdfInvoiceUrl ?? "";
-                decimal paidAmount = (decimal)info.Amount;     // deposit paid now
+                decimal paidAmount = (decimal)info.Amount;
                 decimal totalPrice = (decimal)info.TotalPrice;
                 decimal remaining = Math.Max(0, (decimal)info.RemainingAmount);
                 bool isDepositOnly = remaining > 0;
 
-                string message;
+                var sb = new StringBuilder();
                 if (customerLang == "en")
                 {
-                    message = isDepositOnly
-                        ? $@"✅ *Deposit Received Successfully*
-━━━━━━━━━━━━━━━━━━
-
-👤 *Client:* {(string)info.CustomerName}
-💇 *Service:* {(string)(info.ItemEnName ?? info.ItemArName)}
-💰 *Deposit Paid:* {(string)info.Currency} {paidAmount:F2}
-📊 *Total Price:* {(string)info.Currency} {totalPrice:F2}
-⏳ *Remaining:* {(string)info.Currency} {remaining:F2}
-💳 *Method:* {(string?)info.PaymentMethod ?? "Online"}
-
-📄 *Invoice:* {pdfUrl}
-
-━━━━━━━━━━━━━━━━━━
-Thank you for your deposit! Remaining balance to be paid at the salon. 🙏"
-                        : $@"✅ *Payment Received Successfully*
-━━━━━━━━━━━━━━━━━━
-
-👤 *Client:* {(string)info.CustomerName}
-💇 *Service:* {(string)(info.ItemEnName ?? info.ItemArName)}
-💰 *Amount Paid:* {(string)info.Currency} {paidAmount:F2}
-💳 *Method:* {(string?)info.PaymentMethod ?? "Online"}
-
-📄 *Invoice:* {pdfUrl}
-
-━━━━━━━━━━━━━━━━━━
-Thank you for your payment! 🙏";
+                    string cur = (string)info.Currency;
+                    string method = (string?)info.PaymentMethod ?? "Online";
+                    sb.AppendLine(isDepositOnly ? "✅ *Deposit Received Successfully*" : "✅ *Payment Received Successfully*");
+                    sb.AppendLine("━━━━━━━━━━━━━━━━━━");
+                    sb.AppendLine();
+                    sb.AppendLine($"*Client:* {(string)info.CustomerName}");
+                    sb.AppendLine($"*Service:* {(string)(info.ItemEnName ?? info.ItemArName)}");
+                    if (isDepositOnly)
+                    {
+                        sb.AppendLine($"*Deposit Paid:* {cur} {paidAmount:F2}");
+                        sb.AppendLine($"*Total Price:* {cur} {totalPrice:F2}");
+                        sb.AppendLine($"*Remaining:* {cur} {remaining:F2}");
+                    }
+                    else
+                    {
+                        sb.AppendLine($"*Amount Paid:* {cur} {paidAmount:F2}");
+                    }
+                    sb.AppendLine($"*Method:* {method}");
+                    sb.AppendLine();
+                    sb.AppendLine($"*Invoice:* {pdfUrl}");
+                    sb.AppendLine();
+                    sb.AppendLine("━━━━━━━━━━━━━━━━━━");
+                    sb.AppendLine(isDepositOnly
+                        ? "Thank you for your deposit! Remaining balance to be paid at the salon."
+                        : "Thank you for your payment!");
                 }
                 else
                 {
                     string currencyAr = (string)(info.ArabicCurrencyName ?? info.Currency ?? "د.ك");
-                    message = isDepositOnly
-                        ? $@"✅ *تم استلام الدفعة المقدمة بنجاح*
-━━━━━━━━━━━━━━━━━━
-
-👤 *العميل:* {(string)info.CustomerName}
-💇 *الخدمة:* {(string)(info.ItemArName ?? info.ItemEnName)}
-💰 *المبلغ المدفوع:* {paidAmount:F2} {currencyAr}
-📊 *السعر الكلي:* {totalPrice:F2} {currencyAr}
-⏳ *المتبقي:* {remaining:F2} {currencyAr}
-💳 *طريقة الدفع:* {(string?)info.PaymentMethod ?? "دفع إلكتروني"}
-
-📄 *الفاتورة:* {pdfUrl}
-
-━━━━━━━━━━━━━━━━━━
-شكراً لكم! المبلغ المتبقي يُسدَّد عند الحضور. 🙏"
-                        : $@"✅ *تم استلام الدفعة بنجاح*
-━━━━━━━━━━━━━━━━━━
-
-👤 *العميل:* {(string)info.CustomerName}
-💇 *الخدمة:* {(string)(info.ItemArName ?? info.ItemEnName)}
-💰 *المبلغ المدفوع:* {paidAmount:F2} {currencyAr}
-💳 *طريقة الدفع:* {(string?)info.PaymentMethod ?? "دفع إلكتروني"}
-
-📄 *الفاتورة:* {pdfUrl}
-
-━━━━━━━━━━━━━━━━━━
-شكراً لكم على الدفع! 🙏";
+                    string method = (string?)info.PaymentMethod ?? "دفع إلكتروني";
+                    sb.AppendLine(isDepositOnly ? "✅ *تم استلام الدفعة المقدمة بنجاح*" : "✅ *تم استلام الدفعة بنجاح*");
+                    sb.AppendLine("━━━━━━━━━━━━━━━━━━");
+                    sb.AppendLine();
+                    sb.AppendLine($"*العميل:* {(string)info.CustomerName}");
+                    sb.AppendLine($"*الخدمة:* {(string)(info.ItemArName ?? info.ItemEnName)}");
+                    sb.AppendLine($"*المبلغ المدفوع:* {paidAmount:F2} {currencyAr}");
+                    if (isDepositOnly)
+                    {
+                        sb.AppendLine($"*السعر الكلي:* {totalPrice:F2} {currencyAr}");
+                        sb.AppendLine($"*المتبقي:* {remaining:F2} {currencyAr}");
+                    }
+                    sb.AppendLine($"*طريقة الدفع:* {method}");
+                    sb.AppendLine();
+                    sb.AppendLine($"*الفاتورة:* {pdfUrl}");
+                    sb.AppendLine();
+                    sb.AppendLine("━━━━━━━━━━━━━━━━━━");
+                    sb.AppendLine(isDepositOnly
+                        ? "شكراً لكم! المبلغ المتبقي يُسدَّد عند الحضور."
+                        : "شكراً لكم على الدفع!");
                 }
+                string message = sb.ToString();
 
                 var httpClient = httpClientFactory.CreateClient();
                 string waToken = configuration["WhatsApp:ApiKey"] ?? "";
@@ -978,17 +980,74 @@ Thank you for your payment! 🙏";
                 await httpClient.PostAsync(
                     "https://business.enjazatik.com/api/v1/send-message", content);
 
-                SqlMapper.Execute(conn, @"
-                    UPDATE dbo.MYFATOORAH_TRANSACTIONS SET WhatsAppSent = 1 
-                    WHERE Id = @Id",
-                    new { Id = transactionId });
+                
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"WhatsApp invoice send failed: {ex.Message}");
             }
         }
+        private async Task SendStaffBookingNotifyAsync(IDbConnection conn, int appointmentId)
+        {
+            var waConfig = conn.Query<dynamic>(@"
+        SELECT TOP 1 InstanceId, IsEnabled FROM dbo.WHATSAPP_CONFIG ORDER BY Id").FirstOrDefault();
+            if (waConfig == null || !(bool)waConfig.IsEnabled) return;
 
+            var apt = conn.Query<dynamic>(@"
+        SELECT
+            a.IsOnlineBooking,
+            a.AppointmentDate,
+            LEFT(CONVERT(VARCHAR(8), a.StartTime, 108), 5) AS StartTime,
+            LEFT(CONVERT(VARCHAR(8), a.EndTime,   108), 5) AS EndTime,
+            a.TotalPrice, a.Notes,
+            c.CUSTOMER_NAME   AS CustomerName,
+            c.CUSTOMER_PHONE1 AS CustomerPhone,
+            s.Mobile          AS StaffMobile,
+            b.BRANCH_NAME1    AS BranchName,
+            i.ITEM_NAME2      AS ServiceNameAR,
+            i.ITEM_NAME1      AS ServiceNameEN
+        FROM dbo.AppointmentData a
+        INNER JOIN dbo.CUSTOMER c ON c.CUSTOMER_ID = a.CustomerId
+        INNER JOIN dbo.STAFF    s ON s.Id          = a.StaffId
+        INNER JOIN dbo.BRANCH   b ON b.BRANCH_ID   = a.BranchId
+        INNER JOIN dbo.ITEM     i ON i.ITEM_ID     = a.ItemId
+        WHERE a.Id = @Id",
+                new { Id = appointmentId }).FirstOrDefault();
+
+            if (apt == null) return;
+            if (!(bool)apt.IsOnlineBooking) return;               // أونلاين بس
+            string? staffMobile = (string?)apt.StaffMobile;
+            if (string.IsNullOrWhiteSpace(staffMobile)) return;
+
+            string date = ((DateTime)apt.AppointmentDate).ToString("yyyy-MM-dd");
+            string service = (string)(apt.ServiceNameAR ?? apt.ServiceNameEN ?? "خدمة");
+            string notes = string.IsNullOrWhiteSpace((string?)apt.Notes) ? "" : (string)apt.Notes;
+
+            var sb = new StringBuilder();
+            sb.AppendLine("📅 حجز جديد (مدفوع)");
+            sb.AppendLine("━━━━━━━━━━━━━━━━━━");
+            sb.AppendLine($"العميل: {(string)apt.CustomerName}");
+            sb.AppendLine($"الهاتف: {(string)apt.CustomerPhone}");
+            sb.AppendLine($"الخدمة: {service}");
+            sb.AppendLine($"التاريخ: {date}");
+            sb.AppendLine($"الوقت: {(string)apt.StartTime} - {(string)apt.EndTime}");
+            sb.AppendLine($"الفرع: {(string)apt.BranchName}");
+            sb.AppendLine($"السعر: {((decimal)apt.TotalPrice):F2} د.ك");
+            if (notes != "") sb.AppendLine($"ملاحظات: {notes}");
+
+            string phone = NormalizePhone(staffMobile);
+            var client = httpClientFactory.CreateClient();
+            client.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Bearer", configuration["WhatsApp:ApiKey"] ?? "");
+            var payload = new
+            {
+                instance_id = (string?)waConfig.InstanceId ?? "51d2e384a1ef86b",
+                message = sb.ToString(),
+                number = phone
+            };
+            var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+            await client.PostAsync("https://business.enjazatik.com/api/v1/send-message", content);
+        }
         private static string NormalizePhone(string phone)
         {
             if (string.IsNullOrWhiteSpace(phone)) return "";
