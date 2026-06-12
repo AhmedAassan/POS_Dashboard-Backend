@@ -269,5 +269,62 @@ namespace PosDashboard.Web.Modules.System.Models
             string? VoucherCode,
             DateTime PaidAt
         );
+
+        // =====================================================================
+        // ===== Edit Transaction (change staff per line + payment methods) =====
+        // =====================================================================
+
+        /// <summary>One editable service line in the edit-transaction dialog.</summary>
+        public record EditInvoiceLineDto(
+            string LineType,        // "SALE_LINE" | "APPOINTMENT" | "CHECKOUT_ITEM"
+            int? LineId,            // AppointmentInvoiceLines.Id / AppointmentCheckoutItems.Id (null for legacy original)
+            int AppointmentId,      // appointment that owns the line (drives calendar + staff performance)
+            int ItemId,
+            string ItemName,
+            string ItemNameAr,
+            int StaffId,
+            string StaffName,
+            string StaffNameAr,
+            bool IsRefunded
+        );
+
+        /// <summary>One editable (FULL, non-wallet) payment in the dialog.</summary>
+        public record EditInvoicePaymentDto(
+            int PaymentTypeId,
+            string PaymentTypeName,
+            string PaymentTypeNameAr,
+            decimal Amount
+        );
+
+        /// <summary>Everything the edit dialog needs to render.</summary>
+        public record EditInvoiceInfoDto(
+            int InvoiceId,
+            string InvoiceNumber,
+            int LeadAppointmentId,
+            string Currency,
+            bool CanEdit,
+            string? LockReason,
+            decimal EditableTotal,     // sum of FULL non-wallet payments — must be preserved on save
+            decimal WalletAmount,      // read-only: wallet portion can't be changed here
+            List<EditInvoiceLineDto> Lines,
+            List<EditInvoicePaymentDto> Payments
+        );
+
+        // ----- Save request -----
+        public record EditInvoiceStaffChange(
+            string LineType,        // "SALE_LINE" | "APPOINTMENT" | "CHECKOUT_ITEM"
+            int? LineId,
+            int AppointmentId,
+            int NewStaffId
+        );
+        public record EditInvoicePaymentInput(
+            int PaymentTypeId,
+            decimal Amount,
+            string? VoucherCode
+        );
+        public record EditInvoiceRequest(
+            List<EditInvoiceStaffChange>? StaffChanges,
+            List<EditInvoicePaymentInput>? Payments   // null => leave payments untouched
+        );
     }
 }

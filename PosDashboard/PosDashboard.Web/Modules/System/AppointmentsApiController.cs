@@ -1549,8 +1549,428 @@ namespace PosDashboard.Web.Modules.System
             return Ok(new ApiResult<DetailedInvoiceDto>(true, null, dto));
         }
 
+        // =============================================
+        // GET /api/appointments/{id}/edit-info
+        // Returns service lines + editable payments for the edit-transaction dialog
+        // =============================================
+        [HttpGet("{id:int}/edit-info")]
+        public ActionResult<ApiResult<EditInvoiceInfoDto>> GetEditInfo(int id)
+        {
+            using var conn = sqlConnections.NewByKey("Default");
+
+            var invoice = ResolveInvoiceHead(conn, id);
+            if (invoice == null)
+                return Ok(new ApiResult<EditInvoiceInfoDto>(false,
+                    "Invoice not found for this appointment", null));
+
+            int invoiceId = (int)invoice.Id;
+            int leadApptId = (int)invoice.AppointmentId;
+            string currency = (string)invoice.Currency;
+
+            bool isVoid = invoice.IsVoid != null && Convert.ToBoolean(invoice.IsVoid);
+            bool isFullyRefunded = invoice.IsFullyRefunded != null && Convert.ToBoolean(invoice.IsFullyRefunded);
+
+            string? lockReason = null;
+            if (isVoid) lockReason = "This invoice has been voided and cannot be edited.";
+            else if (isFullyRefunded) lockReason = "This invoice has been fully refunded and cannot be edited.";
+            bool canEdit = lockReason == null;
+
+            // ── Service lines (mirrors GetInvoice, tagged with a LineType discriminator) ──
+            var lines = new List<EditInvoiceLineDto>();
+
+            var saleLines = SqlMapper.Query(conn, @"
+                SELECT ail.Id, ail.AppointmentId, ail.ItemId, ail.StaffId,
+                       ISNULL(ail.IsRefunded, 0) AS IsRefunded,
+                       i.ITEM_NAME1 AS ItemName, i.ITEM_NAME2 AS ItemNameAr,
+                       s.EnglishName AS StaffName, s.ArabicName AS StaffNameAr
+                FROM dbo.AppointmentInvoiceLines ail
+                INNER JOIN dbo.ITEM  i ON i.ITEM_ID = ail.ItemId
+                INNER JOIN dbo.STAFF s ON s.Id      = ail.StaffId
+                WHERE ail.InvoiceId = @InvoiceId
+                ORDER BY ail.Id",
+                new { InvoiceId = invoiceId }).ToList();
+
+            if (saleLines.Count > 0)
+            {
+                foreach (var sl in saleLines)
+                    lines.Add(new EditInvoiceLineDto(
+                        LineType: "SALE_LINE",
+                        LineId: (int)sl.Id,
+                        AppointmentId: (int)sl.AppointmentId,
+                        ItemId: (int)sl.ItemId,
+                        ItemName: (string)(sl.ItemName ?? ""),
+                        ItemNameAr: (string)(sl.ItemNameAr ?? ""),
+                        StaffId: (int)sl.StaffId,
+                        StaffName: (string)(sl.StaffName ?? ""),
+                        StaffNameAr: (string)(sl.StaffNameAr ?? ""),
+                        IsRefunded: (bool)sl.IsRefunded));
+            }
+            else
+            {
+                // Legacy: original appointment line
+                var orig = SqlMapper.Query(conn, @"
+                    SELECT a.Id AS AppointmentId, a.ItemId, a.StaffId,
+                           i.ITEM_NAME1 AS ItemName, i.ITEM_NAME2 AS ItemNameAr,
+                           s.EnglishName AS StaffName, s.ArabicName AS StaffNameAr
+                    FROM dbo.AppointmentData a
+                    INNER JOIN dbo.ITEM  i ON i.ITEM_ID = a.ItemId
+                    INNER JOIN dbo.STAFF s ON s.Id      = a.StaffId
+                    WHERE a.Id = @Id",
+                    new { Id = leadApptId }).FirstOrDefault();
+
+                if (orig != null)
+                    lines.Add(new EditInvoiceLineDto(
+                        LineType: "APPOINTMENT",
+                        LineId: null,
+                        AppointmentId: (int)orig.AppointmentId,
+                        ItemId: (int)orig.ItemId,
+                        ItemName: (string)(orig.ItemName ?? ""),
+                        ItemNameAr: (string)(orig.ItemNameAr ?? ""),
+                        StaffId: (int)orig.StaffId,
+                        StaffName: (string)(orig.StaffName ?? ""),
+                        StaffNameAr: (string)(orig.StaffNameAr ?? ""),
+                        IsRefunded: false));
+
+                // Legacy: extra checkout items
+                var extras = SqlMapper.Query(conn, @"
+                    SELECT ci.Id, ci.AppointmentId, ci.ItemId, ci.StaffId,
+                           ISNULL(ci.IsRefunded, 0) AS IsRefunded,
+                           i.ITEM_NAME1 AS ItemName, i.ITEM_NAME2 AS ItemNameAr,
+                           s.EnglishName AS StaffName, s.ArabicName AS StaffNameAr
+                    FROM dbo.AppointmentCheckoutItems ci
+                    INNER JOIN dbo.ITEM  i ON i.ITEM_ID = ci.ItemId
+                    INNER JOIN dbo.STAFF s ON s.Id      = ci.StaffId
+                    WHERE ci.AppointmentId = @Id
+                    ORDER BY ci.CreatedAt",
+                    new { Id = leadApptId }).ToList();
+
+                foreach (var ex in extras)
+                    lines.Add(new EditInvoiceLineDto(
+                        LineType: "CHECKOUT_ITEM",
+                        LineId: (int)ex.Id,
+                        AppointmentId: (int)ex.AppointmentId,
+                        ItemId: (int)ex.ItemId,
+                        ItemName: (string)(ex.ItemName ?? ""),
+                        ItemNameAr: (string)(ex.ItemNameAr ?? ""),
+                        StaffId: (int)ex.StaffId,
+                        StaffName: (string)(ex.StaffName ?? ""),
+                        StaffNameAr: (string)(ex.StaffNameAr ?? ""),
+                        IsRefunded: (bool)ex.IsRefunded));
+            }
+
+            // ── Editable payments: FULL, non-wallet rows across all invoice appointments ──
+            var allApptIds = GetInvoiceAppointmentIds(conn, invoiceId, leadApptId);
+
+            var payRows = SqlMapper.Query(conn, @"
+                SELECT ap.PaymentTypeId,
+                       SUM(ap.Amount)                AS Amount,
+                       pt.INVOICE_PAYMENT_TYPE_NAME1 AS Name1,
+                       pt.INVOICE_PAYMENT_TYPE_NAME2 AS Name2
+                FROM dbo.AppointmentPayments ap
+                LEFT JOIN dbo.INVOICE_PAYMENT_TYPE pt
+                    ON pt.INVOICE_PAYMENT_TYPE_ID = ap.PaymentTypeId
+                WHERE ap.AppointmentId IN @Ids
+                  AND ap.IsWalletPayment = 0
+                  AND ap.PaymentAs = 'FULL'
+                GROUP BY ap.PaymentTypeId, pt.INVOICE_PAYMENT_TYPE_NAME1, pt.INVOICE_PAYMENT_TYPE_NAME2
+                ORDER BY MIN(ap.PaidAt)",
+                new { Ids = allApptIds }).ToList();
+
+            var payments = payRows.Select(p => new EditInvoicePaymentDto(
+                PaymentTypeId: (int)p.PaymentTypeId,
+                PaymentTypeName: (string)(p.Name1 ?? ""),
+                PaymentTypeNameAr: (string)(p.Name2 ?? ""),
+                Amount: (decimal)p.Amount
+            )).ToList();
+
+            decimal editableTotal = payments.Sum(p => p.Amount);
+
+            decimal walletAmount = SqlMapper.Query<decimal?>(conn, @"
+                SELECT ISNULL(SUM(ap.Amount), 0)
+                FROM dbo.AppointmentPayments ap
+                WHERE ap.AppointmentId IN @Ids AND ap.IsWalletPayment = 1",
+                new { Ids = allApptIds }).FirstOrDefault() ?? 0m;
+
+            var dto = new EditInvoiceInfoDto(
+                InvoiceId: invoiceId,
+                InvoiceNumber: (string)invoice.InvoiceNumber,
+                LeadAppointmentId: leadApptId,
+                Currency: currency,
+                CanEdit: canEdit,
+                LockReason: lockReason,
+                EditableTotal: editableTotal,
+                WalletAmount: walletAmount,
+                Lines: lines,
+                Payments: payments
+            );
+
+            return Ok(new ApiResult<EditInvoiceInfoDto>(true, null, dto));
+        }
+
+        // =============================================
+        // POST /api/appointments/{id}/edit-invoice
+        // Change staff per line and/or redistribute payment methods.
+        // Runs in a single transaction so the invoice, calendar and
+        // staff-performance numbers all stay consistent.
+        // =============================================
+        [HttpPost("{id:int}/edit-invoice")]
+        public ActionResult<ApiResult<object>> EditInvoice(
+            int id, [FromBody] EditInvoiceRequest request)
+        {
+            if (request == null)
+                return Ok(new ApiResult<object>(false, "Request body is required", null));
+
+            using var conn = sqlConnections.NewByKey("Default");
+
+            var invoice = ResolveInvoiceHead(conn, id);
+            if (invoice == null)
+                return Ok(new ApiResult<object>(false, "Invoice not found", null));
+
+            int invoiceId = (int)invoice.Id;
+            int leadApptId = (int)invoice.AppointmentId;
+
+            bool isVoid = invoice.IsVoid != null && Convert.ToBoolean(invoice.IsVoid);
+            bool isFullyRefunded = invoice.IsFullyRefunded != null && Convert.ToBoolean(invoice.IsFullyRefunded);
+            decimal totalRefunded = invoice.TotalRefunded == null || invoice.TotalRefunded is DBNull
+                ? 0m : (decimal)invoice.TotalRefunded;
+
+            if (isVoid)
+                return Ok(new ApiResult<object>(false, "Cannot edit a voided invoice", null));
+            if (isFullyRefunded)
+                return Ok(new ApiResult<object>(false, "Cannot edit a fully-refunded invoice", null));
+
+            var allApptIds = GetInvoiceAppointmentIds(conn, invoiceId, leadApptId);
+
+            using var uow = new UnitOfWork(conn);
+            try
+            {
+                // ───────────── 1) Staff changes ─────────────
+                var staffChanges = request.StaffChanges ?? new List<EditInvoiceStaffChange>();
+                foreach (var ch in staffChanges)
+                {
+                    bool staffOk = SqlMapper.Query<int>(conn,
+                        "SELECT Id FROM dbo.STAFF WHERE Id = @Id AND Deleted = 0 AND Active = 1",
+                        new { Id = ch.NewStaffId }).Any();
+                    if (!staffOk)
+                        return Ok(new ApiResult<object>(false,
+                            $"Staff #{ch.NewStaffId} not found or inactive", null));
+
+                    switch (ch.LineType)
+                    {
+                        case "SALE_LINE":
+                            {
+                                if (ch.LineId == null)
+                                    return Ok(new ApiResult<object>(false,
+                                        "LineId is required for a SALE_LINE change", null));
+
+                                var lineApptId = SqlMapper.Query<int?>(conn, @"
+                                    SELECT AppointmentId FROM dbo.AppointmentInvoiceLines
+                                    WHERE Id = @LineId AND InvoiceId = @InvoiceId",
+                                    new { LineId = ch.LineId.Value, InvoiceId = invoiceId })
+                                    .FirstOrDefault();
+
+                                if (lineApptId == null)
+                                    return Ok(new ApiResult<object>(false,
+                                        $"Sale line #{ch.LineId} is not part of this invoice", null));
+
+                                // Update the invoice line (drives the invoice/PDF/WhatsApp staff name)
+                                SqlMapper.Execute(conn,
+                                    "UPDATE dbo.AppointmentInvoiceLines SET StaffId = @S WHERE Id = @LineId",
+                                    new { S = ch.NewStaffId, LineId = ch.LineId.Value });
+                                // Update the owning appointment (drives the calendar + staff performance)
+                                SqlMapper.Execute(conn,
+                                    "UPDATE dbo.AppointmentData SET StaffId = @S, UpdatedAt = SYSUTCDATETIME() WHERE Id = @A",
+                                    new { S = ch.NewStaffId, A = lineApptId.Value });
+                                break;
+                            }
+
+                        case "APPOINTMENT":
+                            {
+                                if (!allApptIds.Contains(ch.AppointmentId))
+                                    return Ok(new ApiResult<object>(false,
+                                        $"Appointment #{ch.AppointmentId} is not part of this invoice", null));
+
+                                SqlMapper.Execute(conn,
+                                    "UPDATE dbo.AppointmentData SET StaffId = @S, UpdatedAt = SYSUTCDATETIME() WHERE Id = @A",
+                                    new { S = ch.NewStaffId, A = ch.AppointmentId });
+                                break;
+                            }
+
+                        case "CHECKOUT_ITEM":
+                            {
+                                if (ch.LineId == null)
+                                    return Ok(new ApiResult<object>(false,
+                                        "LineId is required for a CHECKOUT_ITEM change", null));
+
+                                var ciAppt = SqlMapper.Query<int?>(conn,
+                                    "SELECT AppointmentId FROM dbo.AppointmentCheckoutItems WHERE Id = @LineId",
+                                    new { LineId = ch.LineId.Value }).FirstOrDefault();
+
+                                if (ciAppt == null || !allApptIds.Contains(ciAppt.Value))
+                                    return Ok(new ApiResult<object>(false,
+                                        $"Checkout item #{ch.LineId} is not part of this invoice", null));
+
+                                SqlMapper.Execute(conn,
+                                    "UPDATE dbo.AppointmentCheckoutItems SET StaffId = @S WHERE Id = @LineId",
+                                    new { S = ch.NewStaffId, LineId = ch.LineId.Value });
+                                break;
+                            }
+
+                        default:
+                            return Ok(new ApiResult<object>(false,
+                                $"Unknown line type '{ch.LineType}'", null));
+                    }
+                }
+
+                // ───────────── 2) Payment redistribution ─────────────
+                if (request.Payments != null)
+                {
+                    if (totalRefunded > 0)
+                        return Ok(new ApiResult<object>(false,
+                            "Cannot change payment methods on an invoice that has refunds", null));
+
+                    var newPays = request.Payments;
+                    if (newPays.Count == 0)
+                        return Ok(new ApiResult<object>(false,
+                            "At least one payment method is required", null));
+                    if (newPays.Any(p => p.Amount <= 0))
+                        return Ok(new ApiResult<object>(false,
+                            "Each payment amount must be greater than 0", null));
+
+                    foreach (var p in newPays)
+                    {
+                        bool ptOk = SqlMapper.Query<int>(conn,
+                            "SELECT INVOICE_PAYMENT_TYPE_ID FROM dbo.INVOICE_PAYMENT_TYPE WHERE INVOICE_PAYMENT_TYPE_ID = @Id",
+                            new { Id = p.PaymentTypeId }).Any();
+                        if (!ptOk)
+                            return Ok(new ApiResult<object>(false,
+                                $"Payment type #{p.PaymentTypeId} not found", null));
+                    }
+
+                    // The amount we're allowed to re-split = current FULL non-wallet collected.
+                    decimal currentEditable = SqlMapper.Query<decimal?>(conn, @"
+                        SELECT ISNULL(SUM(Amount), 0)
+                        FROM dbo.AppointmentPayments
+                        WHERE AppointmentId IN @Ids AND IsWalletPayment = 0 AND PaymentAs = 'FULL'",
+                        new { Ids = allApptIds }).FirstOrDefault() ?? 0m;
+
+                    if (currentEditable <= 0)
+                        return Ok(new ApiResult<object>(false,
+                            "There is no cash/card payment on this invoice to modify", null));
+
+                    decimal newTotal = newPays.Sum(p => p.Amount);
+                    if (Math.Abs(newTotal - currentEditable) > 0.001m)
+                        return Ok(new ApiResult<object>(false,
+                            $"Payments must total {currentEditable:0.000} {(string)invoice.Currency}. You entered {newTotal:0.000}.",
+                            null));
+
+                    // Replace the FULL non-wallet payment rows (wallet & deposit rows are kept intact).
+                    SqlMapper.Execute(conn, @"
+                        DELETE FROM dbo.AppointmentPayments
+                        WHERE AppointmentId IN @Ids AND IsWalletPayment = 0 AND PaymentAs = 'FULL'",
+                        new { Ids = allApptIds });
+
+                    foreach (var p in newPays)
+                    {
+                        SqlMapper.Execute(conn, @"
+                            INSERT INTO dbo.AppointmentPayments
+                                (AppointmentId, Amount, PaymentTypeId, PaymentAs, VoucherCode, PaidAt, IsWalletPayment)
+                            VALUES
+                                (@AppointmentId, @Amount, @PaymentTypeId, 'FULL', @VoucherCode, SYSUTCDATETIME(), 0)",
+                            new
+                            {
+                                AppointmentId = leadApptId,
+                                p.Amount,
+                                p.PaymentTypeId,
+                                VoucherCode = string.IsNullOrWhiteSpace(p.VoucherCode) ? null : p.VoucherCode.Trim()
+                            });
+                    }
+
+                    // Keep the invoice's primary payment type in sync (first method entered).
+                    SqlMapper.Execute(conn,
+                        "UPDATE dbo.AppointmentInvoices SET PaymentTypeId = @Pt WHERE Id = @Id",
+                        new { Pt = newPays[0].PaymentTypeId, Id = invoiceId });
+                }
+
+                uow.Commit();
+                return Ok(new ApiResult<object>(true, null, new
+                {
+                    InvoiceId = invoiceId,
+                    UpdatedAppointmentIds = allApptIds
+                }));
+            }
+            catch (Exception ex)
+            {
+                return Ok(new ApiResult<object>(false,
+                    $"Edit failed (rolled back): {ex.Message}", null));
+            }
+        }
+
 
         #region Private Helpers
+
+        /// <summary>
+        /// Resolves the invoice head for an appointment id, covering both the
+        /// direct-link path (legacy / New Sale lead) and the line-link path
+        /// (New Sale non-lead appointments). Mirrors GetInvoice/VoidInvoice.
+        /// </summary>
+        private dynamic? ResolveInvoiceHead(IDbConnection conn, int appointmentId)
+        {
+            var inv = SqlMapper.Query(conn, @"
+                SELECT TOP 1 inv.Id, inv.InvoiceNumber, inv.AppointmentId, inv.Currency,
+                       ISNULL(inv.IsVoid, 0)           AS IsVoid,
+                       ISNULL(inv.IsFullyRefunded, 0)  AS IsFullyRefunded,
+                       ISNULL(inv.TotalRefunded, 0)    AS TotalRefunded
+                FROM dbo.AppointmentInvoices inv
+                WHERE inv.AppointmentId = @Id
+                ORDER BY inv.Id DESC",
+                new { Id = appointmentId }).FirstOrDefault();
+
+            if (inv == null)
+            {
+                inv = SqlMapper.Query(conn, @"
+                    SELECT TOP 1 inv.Id, inv.InvoiceNumber, inv.AppointmentId, inv.Currency,
+                           ISNULL(inv.IsVoid, 0)           AS IsVoid,
+                           ISNULL(inv.IsFullyRefunded, 0)  AS IsFullyRefunded,
+                           ISNULL(inv.TotalRefunded, 0)    AS TotalRefunded
+                    FROM dbo.AppointmentInvoiceLines ail
+                    INNER JOIN dbo.AppointmentInvoices inv ON inv.Id = ail.InvoiceId
+                    WHERE ail.AppointmentId = @Id
+                    ORDER BY ail.Id",
+                    new { Id = appointmentId }).FirstOrDefault();
+            }
+
+            return inv;
+        }
+
+        /// <summary>
+        /// Returns every appointment id linked to an invoice (line rows + lead +
+        /// any SaleGroup members). Always returns at least the lead appointment.
+        /// </summary>
+        private List<int> GetInvoiceAppointmentIds(IDbConnection conn, int invoiceId, int leadApptId)
+        {
+            var lineApptIds = SqlMapper.Query<int>(conn, @"
+                SELECT DISTINCT AppointmentId
+                FROM dbo.AppointmentInvoiceLines
+                WHERE InvoiceId = @InvoiceId",
+                new { InvoiceId = invoiceId }).ToList();
+
+            var ids = lineApptIds.Union(new[] { leadApptId })
+                                 .Where(x => x > 0).Distinct().ToList();
+
+            var groupIds = SqlMapper.Query<int>(conn, @"
+                SELECT DISTINCT a2.Id
+                FROM dbo.AppointmentData a2
+                WHERE a2.SaleGroupId IS NOT NULL
+                  AND a2.SaleGroupId = (
+                      SELECT TOP 1 SaleGroupId FROM dbo.AppointmentData WHERE Id = @Lead
+                  )",
+                new { Lead = leadApptId }).ToList();
+
+            ids = ids.Union(groupIds).Distinct().ToList();
+            if (ids.Count == 0) ids.Add(leadApptId);
+            return ids;
+        }
 
         private AppointmentDto? GetAppointmentById(IDbConnection conn, int id)
         {
