@@ -80,15 +80,22 @@ namespace PosDashboard.Web.Modules.System
                     CheckoutToday AS (
                         SELECT ISNULL(SUM(ap.Amount), 0) AS TotalInvoicePaid
                         FROM dbo.AppointmentPayments ap
-                        INNER JOIN dbo.AppointmentInvoices inv ON inv.AppointmentId = ap.AppointmentId
                         INNER JOIN dbo.AppointmentData a ON a.Id = ap.AppointmentId
-                        INNER JOIN dbo.INVOICE_PAYMENT_TYPE pt ON pt.INVOICE_PAYMENT_TYPE_ID = ap.PaymentTypeId  
+                        INNER JOIN dbo.INVOICE_PAYMENT_TYPE pt ON pt.INVOICE_PAYMENT_TYPE_ID = ap.PaymentTypeId
+                        CROSS APPLY (
+                            SELECT TOP 1 inv.CreatedAt, ISNULL(inv.IsVoid, 0) AS IsVoid
+                            FROM dbo.AppointmentInvoices inv
+                            WHERE inv.AppointmentId = ap.AppointmentId
+                               OR inv.Id IN (SELECT ail.InvoiceId FROM dbo.AppointmentInvoiceLines ail
+                                             WHERE ail.AppointmentId = ap.AppointmentId)
+                            ORDER BY inv.Id
+                        ) ri
                         WHERE a.BranchId = @BranchId
-                          AND inv.CreatedAt >= @DateStart AND inv.CreatedAt < @DateEnd
+                          AND ri.CreatedAt >= @DateStart AND ri.CreatedAt < @DateEnd
                           AND ap.IsWalletPayment = 0
                           AND ap.PaymentAs = 'FULL'
                           AND ISNULL(pt.OnlinePayment, 0) = 0
-                          AND ISNULL(inv.IsVoid, 0) = 0
+                          AND ri.IsVoid = 0
                           AND (@StaffId IS NULL OR a.StaffId = @StaffId)
                     ),
                     DepositsToday AS (
@@ -132,15 +139,22 @@ namespace PosDashboard.Web.Modules.System
                     OnlineFullToday AS (
                         SELECT ISNULL(SUM(ap.Amount), 0) AS OnlineFullRevenue
                         FROM dbo.AppointmentPayments ap
-                        INNER JOIN dbo.AppointmentInvoices inv ON inv.AppointmentId = ap.AppointmentId
                         INNER JOIN dbo.AppointmentData a ON a.Id = ap.AppointmentId
                         INNER JOIN dbo.INVOICE_PAYMENT_TYPE pt ON pt.INVOICE_PAYMENT_TYPE_ID = ap.PaymentTypeId
+                        CROSS APPLY (
+                            SELECT TOP 1 inv.CreatedAt, ISNULL(inv.IsVoid, 0) AS IsVoid
+                            FROM dbo.AppointmentInvoices inv
+                            WHERE inv.AppointmentId = ap.AppointmentId
+                               OR inv.Id IN (SELECT ail.InvoiceId FROM dbo.AppointmentInvoiceLines ail
+                                             WHERE ail.AppointmentId = ap.AppointmentId)
+                            ORDER BY inv.Id
+                        ) ri
                         WHERE a.BranchId = @BranchId
-                          AND inv.CreatedAt >= @DateStart AND inv.CreatedAt < @DateEnd
+                          AND ri.CreatedAt >= @DateStart AND ri.CreatedAt < @DateEnd
                           AND ap.IsWalletPayment = 0
                           AND ap.PaymentAs = 'FULL'
                           AND ISNULL(pt.OnlinePayment, 0) = 1
-                          AND ISNULL(inv.IsVoid, 0) = 0
+                          AND ri.IsVoid = 0
                           AND (@StaffId IS NULL OR a.StaffId = @StaffId)
                     ),
                     -- Deduct cash refunds processed today from checkout revenue
@@ -208,11 +222,19 @@ namespace PosDashboard.Web.Modules.System
                         SELECT ap.PaymentTypeId, ap.Amount
                         FROM dbo.AppointmentPayments ap
                         INNER JOIN dbo.AppointmentData a ON a.Id = ap.AppointmentId
-                        LEFT JOIN dbo.AppointmentInvoices inv ON inv.AppointmentId = a.Id
+                        OUTER APPLY (
+                            SELECT TOP 1 inv.Id AS InvoiceId, ISNULL(inv.IsVoid, 0) AS IsVoid
+                            FROM dbo.AppointmentInvoices inv
+                            WHERE inv.AppointmentId = ap.AppointmentId
+                               OR inv.Id IN (SELECT ail.InvoiceId FROM dbo.AppointmentInvoiceLines ail
+                                             WHERE ail.AppointmentId = ap.AppointmentId)
+                            ORDER BY inv.Id
+                        ) ri
                         WHERE a.BranchId = @BranchId
                           AND ap.PaidAt >= @DateStart AND ap.PaidAt < @DateEnd
                           AND ap.IsWalletPayment = 0
-                          AND ISNULL(inv.IsVoid, 0) = 0
+                          AND ISNULL(ri.IsVoid, 0) = 0
+                          AND (ri.InvoiceId IS NOT NULL OR ap.PaymentAs = 'DEPOSIT')
                           AND (@StaffId IS NULL OR a.StaffId = @StaffId)
                         UNION ALL
                         SELECT sp.PAYMENT_TYPE_ID, sp.PAYMENT_AMOUNT
@@ -289,18 +311,21 @@ namespace PosDashboard.Web.Modules.System
                 ),
                 -- الـ FULL non-wallet payments لكل invoice
                 InvFullPaid AS (
-                    SELECT ap.AppointmentId,
+                    SELECT inv.Id AS InvoiceId,
                            ISNULL(SUM(ap.Amount), 0) AS NonDepositNonWalletPaid,
                            MAX(ap.PaidAt)            AS LastFullPaidAt
-                    FROM dbo.AppointmentPayments ap
-                    INNER JOIN dbo.AppointmentInvoices inv ON inv.AppointmentId = ap.AppointmentId
-                    INNER JOIN dbo.AppointmentData a ON a.Id = ap.AppointmentId
+                    FROM dbo.AppointmentInvoices inv
+                    INNER JOIN dbo.AppointmentData a ON a.Id = inv.AppointmentId
+                    INNER JOIN dbo.AppointmentPayments ap
+                        ON ap.AppointmentId = inv.AppointmentId
+                        OR ap.AppointmentId IN (SELECT ail.AppointmentId FROM dbo.AppointmentInvoiceLines ail
+                                                WHERE ail.InvoiceId = inv.Id)
                     WHERE a.BranchId = @BranchId
                       AND inv.CreatedAt >= @DateStart AND inv.CreatedAt < @DateEnd
                       AND ap.IsWalletPayment = 0
                       AND ap.PaymentAs = 'FULL'
                       AND (@StaffId IS NULL OR a.StaffId = @StaffId)
-                    GROUP BY ap.AppointmentId
+                    GROUP BY inv.Id
                 ),
                 -- آخر non-wallet FULL payment type لكل appointment
                 InvLastPayType AS (
@@ -356,7 +381,7 @@ namespace PosDashboard.Web.Modules.System
                             WHERE a3.Id = ib.AppointmentId
                         ))                                    AS AllServicesName
                     FROM InvBase ib
-                    LEFT JOIN InvFullPaid  fp  ON fp.AppointmentId  = ib.AppointmentId
+                    LEFT JOIN InvFullPaid  fp  ON fp.InvoiceId  = ib.InvoiceId
                     LEFT JOIN InvLastPayType lp ON lp.AppointmentId = ib.AppointmentId
                     LEFT JOIN InvServices  svc ON svc.InvoiceId     = ib.InvoiceId
                 ),
