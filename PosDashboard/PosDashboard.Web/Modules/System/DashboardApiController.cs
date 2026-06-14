@@ -30,8 +30,12 @@ namespace PosDashboard.Web.Modules.System
         public ActionResult<ApiResult<DashboardSummaryDto>> Summary(
             [FromQuery] int branchId,
             [FromQuery] string date,
-            [FromQuery] int? staffId = null)
+            [FromQuery] int? staffId = null,
+            [FromQuery] string? lang = null)
         {
+            // Language for display names: 'ar' uses NAME2/ArabicName columns, anything else 'en'.
+            var langCode = string.Equals((lang ?? "en").Trim(), "ar",
+                StringComparison.OrdinalIgnoreCase) ? "ar" : "en";
             try
             {
                 if (branchId <= 0)
@@ -52,12 +56,16 @@ namespace PosDashboard.Web.Modules.System
                     (SELECT TRY_CAST(SETTING_VALUE AS int) FROM dbo.SYSTEM_SETTING WHERE SETTING_KEY = 'calendarStartHour') AS StartHour,
                     (SELECT TRY_CAST(SETTING_VALUE AS int) FROM dbo.SYSTEM_SETTING WHERE SETTING_KEY = 'calendarEndHour')   AS EndHour,
                     (SELECT TRY_CAST(SETTING_VALUE AS int) FROM dbo.SYSTEM_SETTING WHERE SETTING_KEY = 'timeZoneOffset')    AS TzOffset,
-                    (SELECT EnglishCurrencyName FROM dbo.BRANCH WHERE BRANCH_ID = @BranchId)                                AS Currency",
+                    (SELECT EnglishCurrencyName FROM dbo.BRANCH WHERE BRANCH_ID = @BranchId)                                AS Currency,
+                    (SELECT ArabicCurrencyName  FROM dbo.BRANCH WHERE BRANCH_ID = @BranchId)                                AS CurrencyAr",
                                 metaP).FirstOrDefault();
 
                 int startHour = meta?.StartHour != null ? (int)meta.StartHour : 10;
                 int endHour = meta?.EndHour != null ? (int)meta.EndHour : 22;
-                string currency = meta?.Currency != null ? (string)meta.Currency : "KWD";
+                string currency = langCode == "ar"
+                    ? (meta?.CurrencyAr != null ? (string)meta.CurrencyAr
+                        : (meta?.Currency != null ? (string)meta.Currency : "د.ك"))
+                    : (meta?.Currency != null ? (string)meta.Currency : "KWD");
                 int workdayMinutes = Math.Max(1, (endHour - startHour) * 60);
                 int tzOffset = meta?.TzOffset != null ? (int)meta.TzOffset : 3;
 
@@ -71,7 +79,8 @@ namespace PosDashboard.Web.Modules.System
                     DateStart = dateStart,
                     DateEnd = dateEnd,
                     DateOnly = dateOnly.Date,   // ← Must prefer local date (without offset)
-                    StaffId = staffId
+                    StaffId = staffId,
+                    Lang = langCode
                 };
 
                 // ---------- 2A: Revenue KPIs ----------
@@ -276,13 +285,14 @@ namespace PosDashboard.Web.Modules.System
                     )
                     SELECT
                         pt.INVOICE_PAYMENT_TYPE_ID    AS PaymentTypeId,
-                        pt.INVOICE_PAYMENT_TYPE_NAME1 AS PaymentTypeName,
+                        CASE WHEN @Lang = 'ar' THEN pt.INVOICE_PAYMENT_TYPE_NAME2
+                             ELSE pt.INVOICE_PAYMENT_TYPE_NAME1 END AS PaymentTypeName,
                         pt.DocumentName               AS DocumentName,
                         SUM(ap.Amount)                AS Amount
                     FROM Combined ap
                     INNER JOIN dbo.INVOICE_PAYMENT_TYPE pt
                         ON pt.INVOICE_PAYMENT_TYPE_ID = ap.PaymentTypeId
-                    GROUP BY pt.INVOICE_PAYMENT_TYPE_ID, pt.INVOICE_PAYMENT_TYPE_NAME1, pt.DocumentName
+                    GROUP BY pt.INVOICE_PAYMENT_TYPE_ID, pt.INVOICE_PAYMENT_TYPE_NAME1, pt.INVOICE_PAYMENT_TYPE_NAME2, pt.DocumentName
                     HAVING SUM(ap.Amount) <> 0   -- include negative balances (refund > income)
                     ORDER BY SUM(ap.Amount) DESC;",
                     p)
@@ -330,11 +340,11 @@ namespace PosDashboard.Web.Modules.System
                 -- آخر non-wallet FULL payment type لكل appointment
                 InvLastPayType AS (
                 SELECT ap.AppointmentId,
-                       STRING_AGG(pt.INVOICE_PAYMENT_TYPE_NAME1, ' + ')
+                       STRING_AGG(CASE WHEN @Lang = 'ar' THEN pt.INVOICE_PAYMENT_TYPE_NAME2 ELSE pt.INVOICE_PAYMENT_TYPE_NAME1 END, ' + ')
                            WITHIN GROUP (ORDER BY ap.PaidAt ASC) AS LastPaymentTypeName,
                        -- JSON array للـ breakdown
                        '[' + STRING_AGG(
-                           '{""n"":""' + REPLACE(ISNULL(pt.INVOICE_PAYMENT_TYPE_NAME1, '-'), '""', '') +
+                           '{""n"":""' + REPLACE(ISNULL(CASE WHEN @Lang = 'ar' THEN pt.INVOICE_PAYMENT_TYPE_NAME2 ELSE pt.INVOICE_PAYMENT_TYPE_NAME1 END, '-'), '""', '') +
                            '"",""a"":' + CAST(ap.Amount AS varchar(20)) + '}',
                            ','
                        ) WITHIN GROUP (ORDER BY ap.PaidAt ASC) + ']' AS PaymentBreakdownJson
@@ -348,7 +358,7 @@ namespace PosDashboard.Web.Modules.System
                 -- أسماء الـ services لكل invoice (New Sale = متعددة)
                 InvServices AS (
                     SELECT ail.InvoiceId,
-                           STRING_AGG(i.ITEM_NAME1, ' + ') AS AllServicesName
+                           STRING_AGG(CASE WHEN @Lang = 'ar' THEN i.ITEM_NAME2 ELSE i.ITEM_NAME1 END, ' + ') AS AllServicesName
                     FROM dbo.AppointmentInvoiceLines ail
                     INNER JOIN dbo.ITEM i ON i.ITEM_ID = ail.ItemId
                     GROUP BY ail.InvoiceId
@@ -375,7 +385,7 @@ namespace PosDashboard.Web.Modules.System
                         ISNULL(lp.LastPaymentTypeName, '-')   AS LastPaymentTypeName,
                         ISNULL(lp.PaymentBreakdownJson, '[]') AS PaymentBreakdownJson,
                         ISNULL(svc.AllServicesName, (
-                            SELECT TOP 1 i3.ITEM_NAME1
+                            SELECT TOP 1 CASE WHEN @Lang = 'ar' THEN i3.ITEM_NAME2 ELSE i3.ITEM_NAME1 END
                             FROM dbo.AppointmentData a3
                             INNER JOIN dbo.ITEM i3 ON i3.ITEM_ID = a3.ItemId
                             WHERE a3.Id = ib.AppointmentId
@@ -391,7 +401,7 @@ namespace PosDashboard.Web.Modules.System
                         'CHECKOUT'                AS TransactionType,
                         ia.InvoiceNumber,
                         c.CUSTOMER_NAME           AS CustomerName,
-                        s.EnglishName             AS StaffName,
+                        CASE WHEN @Lang = 'ar' THEN s.ArabicName ELSE s.EnglishName END AS StaffName,
                         ia.AllServicesName        AS ServiceName,
                         ia.NonDepositNonWalletPaid AS Amount,
                         ia.LastPaymentTypeName    AS PaymentTypeName,
@@ -416,9 +426,11 @@ namespace PosDashboard.Web.Modules.System
                     SELECT
                         'DEP-' + CAST(ap.Id AS varchar(20)),
                         'DEPOSIT', NULL,
-                        c.CUSTOMER_NAME, s.EnglishName, i.ITEM_NAME1,
+                        c.CUSTOMER_NAME,
+                        CASE WHEN @Lang = 'ar' THEN s.ArabicName ELSE s.EnglishName END,
+                        CASE WHEN @Lang = 'ar' THEN i.ITEM_NAME2 ELSE i.ITEM_NAME1 END,
                         ap.Amount,
-                        ISNULL(pt.INVOICE_PAYMENT_TYPE_NAME1, '-'),
+                        ISNULL(CASE WHEN @Lang = 'ar' THEN pt.INVOICE_PAYMENT_TYPE_NAME2 ELSE pt.INVOICE_PAYMENT_TYPE_NAME1 END, '-'),
                         NULL,
                         NULL,
                         ap.PaidAt,
@@ -447,7 +459,7 @@ namespace PosDashboard.Web.Modules.System
                         'WALLET_LOAD', NULL,
                         c.CUSTOMER_NAME, NULL, st.NAME,
                         sp.PAYMENT_AMOUNT,
-                        ISNULL(pt.INVOICE_PAYMENT_TYPE_NAME1, '-'),
+                        ISNULL(CASE WHEN @Lang = 'ar' THEN pt.INVOICE_PAYMENT_TYPE_NAME2 ELSE pt.INVOICE_PAYMENT_TYPE_NAME1 END, '-'),
                         NULL,
                         NULL,
                         sp.PAYMENT_DATE,
@@ -471,9 +483,9 @@ namespace PosDashboard.Web.Modules.System
                     SELECT
                         'PKG-' + CAST(pp.Id AS varchar(20)),
                         'PACKAGE_SALE', NULL,
-                        c.CUSTOMER_NAME, NULL, pkg.EnglishName,
+                        c.CUSTOMER_NAME, NULL, CASE WHEN @Lang = 'ar' THEN pkg.ArabicName ELSE pkg.EnglishName END,
                         pp.PaymentAmount,
-                        ISNULL(pt.INVOICE_PAYMENT_TYPE_NAME1, '-'),
+                        ISNULL(CASE WHEN @Lang = 'ar' THEN pt.INVOICE_PAYMENT_TYPE_NAME2 ELSE pt.INVOICE_PAYMENT_TYPE_NAME1 END, '-'),
                         NULL,
                         NULL,
                         pp.AddedDate,
@@ -592,7 +604,7 @@ namespace PosDashboard.Web.Modules.System
                 var staffRows = SqlMapper.Query<dynamic>(conn, @"
                 SELECT
                     s.Id            AS StaffId,
-                    s.EnglishName   AS StaffName,
+                    CASE WHEN @Lang = 'ar' THEN s.ArabicName ELSE s.EnglishName END   AS StaffName,
                     COUNT(DISTINCT a.Id)                                                    AS AppointmentCount,
                     SUM(CASE WHEN a.Status = 'completed' THEN 1 ELSE 0 END)                AS CompletedCount,
                     SUM(CASE WHEN a.Status = 'cancelled' THEN 1 ELSE 0 END)                AS CancelledCount,
@@ -688,7 +700,7 @@ namespace PosDashboard.Web.Modules.System
                   AND s.Active = 1
                   AND (s.BranchId IS NULL OR s.BranchId = @BranchId)
                   AND (@StaffId IS NULL OR s.Id = @StaffId)
-                GROUP BY s.Id, s.EnglishName
+                GROUP BY s.Id, s.EnglishName, s.ArabicName
                 HAVING COUNT(DISTINCT a.Id) > 0
                 ORDER BY TotalRevenue DESC;",
                 p).ToList();
@@ -698,7 +710,7 @@ namespace PosDashboard.Web.Modules.System
                 SELECT
                     a.StaffId,
                     c.CUSTOMER_NAME                         AS CustomerName,
-                    i.ITEM_NAME1                            AS ServiceName,
+                    CASE WHEN @Lang = 'ar' THEN i.ITEM_NAME2 ELSE i.ITEM_NAME1 END                            AS ServiceName,
                     CASE
                         -- OFFER package: حساب النصيب النسبي
                         WHEN ai.PackageOfferId IS NOT NULL
@@ -778,7 +790,7 @@ namespace PosDashboard.Web.Modules.System
                 SELECT
                     aci.StaffId,
                     c.CUSTOMER_NAME                         AS CustomerName,
-                    i.ITEM_NAME1                            AS ServiceName,
+                    CASE WHEN @Lang = 'ar' THEN i.ITEM_NAME2 ELSE i.ITEM_NAME1 END                            AS ServiceName,
                     aci.DiscountedUnitPrice                 AS Amount,
                     NULL                                    AS [Time]
                 FROM dbo.AppointmentCheckoutItems aci
@@ -796,7 +808,7 @@ namespace PosDashboard.Web.Modules.System
                 SELECT
                     cps.StaffId,
                     c.CUSTOMER_NAME                         AS CustomerName,
-                    i.ITEM_NAME1                            AS ServiceName,
+                    CASE WHEN @Lang = 'ar' THEN i.ITEM_NAME2 ELSE i.ITEM_NAME1 END                            AS ServiceName,
                     CASE
                         WHEN ISNULL(cps.ItemPriceInPackage, 0) > 0
                         THEN cps.ItemPriceInPackage
@@ -883,14 +895,14 @@ namespace PosDashboard.Web.Modules.System
                 ;WITH HourBuckets AS (
                     SELECT
                         DATEPART(HOUR, a.StartTime) AS Hour,
-                        i.ITEM_NAME1                AS ServiceName,
+                        CASE WHEN @Lang = 'ar' THEN i.ITEM_NAME2 ELSE i.ITEM_NAME1 END                AS ServiceName,
                         COUNT(*)                    AS Cnt
                     FROM dbo.AppointmentData a
                     INNER JOIN dbo.ITEM i ON i.ITEM_ID = a.ItemId
                     WHERE a.BranchId = @BranchId
                       AND a.AppointmentDate = @DateOnly
                       AND (@StaffId IS NULL OR a.StaffId = @StaffId)
-                    GROUP BY DATEPART(HOUR, a.StartTime), i.ITEM_NAME1
+                    GROUP BY DATEPART(HOUR, a.StartTime), i.ITEM_NAME1, i.ITEM_NAME2
                 ),
                 HourTotals AS (
                     SELECT Hour, SUM(Cnt) AS Total FROM HourBuckets GROUP BY Hour
@@ -942,7 +954,7 @@ namespace PosDashboard.Web.Modules.System
                 // ---------- 2F: Service Categories ----------
                 var categories = SqlMapper.Query<dynamic>(conn, @"
                 SELECT
-                    ac.EnglishName                              AS CategoryName,
+                    CASE WHEN @Lang = 'ar' THEN ac.ArabicName ELSE ac.EnglishName END              AS CategoryName,
                     COUNT(a.Id)                                 AS AppointmentCount,
                     ISNULL(SUM(a.DiscountedUnitPrice), 0)       AS Revenue
                 FROM dbo.AppointmentData a
@@ -952,7 +964,7 @@ namespace PosDashboard.Web.Modules.System
                   AND a.AppointmentDate = @DateOnly
                   AND (@StaffId IS NULL OR a.StaffId = @StaffId)
                   AND ISNULL(ac.Deleted, 0) = 0
-                GROUP BY ac.EnglishName
+                GROUP BY ac.EnglishName, ac.ArabicName
                 ORDER BY Revenue DESC;",
                 p)
                 .Select(r => new ServiceCategoryBreakdownDto(

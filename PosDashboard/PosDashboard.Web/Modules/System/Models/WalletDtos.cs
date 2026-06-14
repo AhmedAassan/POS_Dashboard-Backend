@@ -58,6 +58,7 @@ namespace PosDashboard.Web.Modules.System.Models
             int SubscriptionId,
             int PaymentTypeId,
             string PaymentTypeName,
+            string PaymentTypeNameAr,
             decimal PaymentAmount,
             DateTime PaymentDate,
             string? Notes,
