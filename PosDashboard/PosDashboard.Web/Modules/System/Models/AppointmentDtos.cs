@@ -224,7 +224,12 @@ namespace PosDashboard.Web.Modules.System.Models
             int Quantity,
             decimal UnitPrice,
             decimal TotalPrice,
-            bool IsOriginal
+            bool IsOriginal,
+            // POS multi-package (OFFER) grouping — lines that share a PackageGroupId
+            // render as one package block (fixed price). Null = standalone extra line.
+            int? PackageOfferId = null,
+            string? PackageOfferName = null,
+            Guid? PackageGroupId = null
         );
 
         /// <summary>One refund transaction linked to this invoice</summary>

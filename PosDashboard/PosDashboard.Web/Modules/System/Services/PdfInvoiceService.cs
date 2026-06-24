@@ -6,6 +6,7 @@ using QuestPDF.Infrastructure;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net.Http;
 
 namespace PosDashboard.Web.Modules.System.Services
@@ -17,6 +18,10 @@ namespace PosDashboard.Web.Modules.System.Services
         public int Quantity { get; set; }
         public decimal UnitPrice { get; set; }
         public decimal TotalPrice { get; set; }
+        // POS multi-package grouping: lines sharing a PackageGroupId render as
+        // one package block (fixed price). Null = standalone extra service.
+        public Guid? PackageGroupId { get; set; }
+        public string? PackageOfferName { get; set; }
     }
 
     public class InvoicePdfData
@@ -184,54 +189,91 @@ namespace PosDashboard.Web.Modules.System.Services
                 column.Item().PaddingVertical(10)
                     .LineHorizontal(1).LineColor("#e5e7eb");
 
-                // Line items table
-                column.Item().Table(table =>
+                // Line items — grouped: package blocks first, then standalone extras
+                var packageGroups = data.LineItems
+                    .Where(x => x.PackageGroupId != null)
+                    .GroupBy(x => x.PackageGroupId!.Value)
+                    .ToList();
+                var standalone = data.LineItems
+                    .Where(x => x.PackageGroupId == null)
+                    .ToList();
+
+                column.Item().Column(items =>
                 {
-                    table.ColumnsDefinition(cols =>
+                    // ----- Package (OFFER) blocks -----
+                    foreach (var g in packageGroups)
                     {
-                        cols.ConstantColumn(30);   // #
-                        cols.RelativeColumn(3);    // Item
-                        cols.RelativeColumn(2);    // Staff
-                        cols.ConstantColumn(40);   // Qty
-                        cols.ConstantColumn(80);   // Unit Price
-                        cols.ConstantColumn(80);   // Total
-                    });
+                        var glines = g.ToList();
+                        decimal pkgPrice = glines.Sum(x => x.TotalPrice);
+                        string pkgName = glines[0].PackageOfferName ?? "Package";
 
-                    // Header
-                    table.Header(header =>
+                        items.Item().PaddingBottom(6).Border(1).BorderColor("#111827").Column(block =>
+                        {
+                            // Package header: name + fixed price (black, bold)
+                            block.Item().Background("#f3f4f6").Padding(7).Row(row =>
+                            {
+                                row.RelativeItem().Text(t =>
+                                {
+                                    t.Span("PACKAGE / باقة  ").FontSize(8).Bold().FontColor("#111827");
+                                    t.Span(pkgName).FontSize(12).Bold().FontColor("#111827");
+                                });
+                                row.ConstantItem(110).AlignRight()
+                                    .Text($"{data.Currency} {pkgPrice:F2}")
+                                    .FontSize(12).Bold().FontColor("#111827");
+                            });
+
+                            // Services inside the package: name + staff only (no price)
+                            for (int si = 0; si < glines.Count; si++)
+                            {
+                                var s = glines[si];
+                                block.Item().BorderTop(si == 0 ? 0 : 1).BorderColor("#e5e7eb")
+                                    .PaddingHorizontal(8).PaddingVertical(4).Row(row =>
+                                    {
+                                        row.RelativeItem().Text($"• {s.ItemName}")
+                                            .FontSize(10).Bold().FontColor("#111827");
+                                        row.ConstantItem(170).AlignRight().Text(s.StaffName)
+                                            .FontSize(9).FontColor("#374151");
+                                    });
+                            }
+                        });
+                    }
+
+                    // ----- Standalone services (outside any package) -----
+                    if (standalone.Count > 0)
                     {
-                        header.Cell().Background("#f3f4f6").Padding(6)
-                            .Text("#").FontSize(9).Bold();
-                        header.Cell().Background("#f3f4f6").Padding(6)
-                            .Text("Item / الصنف").FontSize(9).Bold();
-                        header.Cell().Background("#f3f4f6").Padding(6)
-                            .Text("Staff / المختص").FontSize(9).Bold();
-                        header.Cell().Background("#f3f4f6").Padding(6).AlignCenter()
-                            .Text("Qty").FontSize(9).Bold();
-                        header.Cell().Background("#f3f4f6").Padding(6).AlignRight()
-                            .Text("Price / السعر").FontSize(9).Bold();
-                        header.Cell().Background("#f3f4f6").Padding(6).AlignRight()
-                            .Text("Total / المجموع").FontSize(9).Bold();
-                    });
+                        items.Item().PaddingTop(packageGroups.Count > 0 ? 2 : 0).Table(table =>
+                        {
+                            table.ColumnsDefinition(cols =>
+                            {
+                                cols.RelativeColumn(3);    // Item
+                                cols.RelativeColumn(2);    // Staff
+                                cols.ConstantColumn(90);   // Price
+                            });
 
-                    // Rows
-                    for (int i = 0; i < data.LineItems.Count; i++)
-                    {
-                        var item = data.LineItems[i];
-                        var bg = i % 2 == 0 ? "#ffffff" : "#f9fafb";
+                            table.Header(header =>
+                            {
+                                header.Cell().Background("#f3f4f6").Padding(6)
+                                    .Text("Item / الصنف").FontSize(9).Bold();
+                                header.Cell().Background("#f3f4f6").Padding(6)
+                                    .Text("Staff / المختص").FontSize(9).Bold();
+                                header.Cell().Background("#f3f4f6").Padding(6).AlignRight()
+                                    .Text("Price / السعر").FontSize(9).Bold();
+                            });
 
-                        table.Cell().Background(bg).Padding(6)
-                            .Text($"{i + 1}").FontSize(9);
-                        table.Cell().Background(bg).Padding(6)
-                            .Text(item.ItemName).FontSize(10);
-                        table.Cell().Background(bg).Padding(6)
-                            .Text(item.StaffName).FontSize(9).FontColor("#6b7280");
-                        table.Cell().Background(bg).Padding(6).AlignCenter()
-                            .Text($"{item.Quantity}").FontSize(10);
-                        table.Cell().Background(bg).Padding(6).AlignRight()
-                            .Text($"{data.Currency} {item.UnitPrice:F2}").FontSize(10);
-                        table.Cell().Background(bg).Padding(6).AlignRight()
-                            .Text($"{data.Currency} {item.TotalPrice:F2}").FontSize(10);
+                            for (int i = 0; i < standalone.Count; i++)
+                            {
+                                var item = standalone[i];
+                                var bg = i % 2 == 0 ? "#ffffff" : "#f9fafb";
+
+                                table.Cell().Background(bg).Padding(6)
+                                    .Text(item.ItemName).FontSize(10).Bold().FontColor("#111827");
+                                table.Cell().Background(bg).Padding(6)
+                                    .Text(item.StaffName).FontSize(9).FontColor("#374151");
+                                table.Cell().Background(bg).Padding(6).AlignRight()
+                                    .Text($"{data.Currency} {item.TotalPrice:F2}")
+                                    .FontSize(10).Bold().FontColor("#111827");
+                            }
+                        });
                     }
                 });
 

@@ -79,12 +79,39 @@ namespace PosDashboard.Web.Modules.System.Models
             bool OnlinePayment
         );
 
+        // One service inside an OFFER package (keyed by ItemUnitId, the same
+        // identifier the offer checkout lines use).
+        public record PosOfferItemDto(
+            int ItemUnitId,
+            int ItemId,
+            string ItemNameEn,
+            string ItemNameAr,
+            int UnitId,
+            string UnitNameEn,
+            string UnitNameAr,
+            decimal ItemPrice,          // catalog price (before the package discount)
+            double DurationMinutes
+        );
+
+        // An OFFER package the cashier can add to the cart.
+        public record PosOfferDto(
+            int PackageOfferId,
+            string NameEn,
+            string NameAr,
+            decimal Amount,             // the fixed package price
+            int NoOfDays,
+            decimal TotalRealValue,     // sum of item catalog prices
+            decimal Savings,            // TotalRealValue - Amount (>= 0)
+            List<PosOfferItemDto> Items
+        );
+
         public record PosCatalogDto(
             PosBranchDto Branch,
             List<PosCategoryDto> Categories,
             List<PosServiceDto> Services,
             List<PosStaffDto> Staff,
-            List<PosPaymentTypeDto> PaymentTypes
+            List<PosPaymentTypeDto> PaymentTypes,
+            List<PosOfferDto> Offers
         );
 
         // =====================================================================
@@ -114,13 +141,30 @@ namespace PosDashboard.Web.Modules.System.Models
             List<PosSplitPaymentRequest>? Splits
         );
 
+        // One chosen service inside a selected package instance.
+        // ItemUnitId must belong to PackageOfferId; StaffId is per-service.
+        public record PosCheckoutPackageLineRequest(
+            int ItemUnitId,
+            int StaffId,
+            int? DurationMinutes,
+            string? Notes
+        );
+
+        // One package instance added to the cart. The same package can appear
+        // multiple times (each becomes its own group).
+        public record PosCheckoutPackageRequest(
+            int PackageOfferId,
+            List<PosCheckoutPackageLineRequest> Lines
+        );
+
         public record PosCheckoutRequest(
             int BranchId,
             int CustomerId,
             string? Notes,
-            List<PosCheckoutLineRequest> Lines,
+            List<PosCheckoutLineRequest> Lines,          // standalone extra services
             PosPaymentsRequest? Payments,
-            bool SendWhatsApp
+            bool SendWhatsApp,
+            List<PosCheckoutPackageRequest>? Packages = null   // selected OFFER packages
         );
 
         public record PosCheckoutResponse(
@@ -156,7 +200,10 @@ namespace PosDashboard.Web.Modules.System.Models
             string StaffNameAr,
             int Quantity,
             decimal UnitPrice,
-            decimal TotalPrice
+            decimal TotalPrice,
+            int? PackageOfferId,
+            string? PackageOfferName,
+            Guid? PackageGroupId
         );
 
         public record PosReceiptPaymentDto(

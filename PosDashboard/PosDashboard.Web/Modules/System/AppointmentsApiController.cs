@@ -1323,7 +1323,10 @@ namespace PosDashboard.Web.Modules.System
             s.ArabicName  AS StaffNameAr,
             1                         AS Quantity,
             ail.DiscountedUnitPrice   AS UnitPrice,
-            ail.TotalPrice            AS TotalPrice
+            ail.TotalPrice            AS TotalPrice,
+            ail.PackageOfferId        AS PackageOfferId,
+            ail.PackageOfferName      AS PackageOfferName,
+            ail.PackageGroupId        AS PackageGroupId
         FROM dbo.AppointmentInvoiceLines ail
         INNER JOIN dbo.ITEM i
             ON i.ITEM_ID = ail.ItemId
@@ -1360,7 +1363,13 @@ namespace PosDashboard.Web.Modules.System
                         Quantity: (int)sl.Quantity,
                         UnitPrice: (decimal)sl.UnitPrice,
                         TotalPrice: (decimal)sl.TotalPrice,
-                        IsOriginal: lineAppointmentId == leadAppointmentId
+                        IsOriginal: lineAppointmentId == leadAppointmentId,
+                        PackageOfferId: sl.PackageOfferId == null || sl.PackageOfferId is DBNull
+                            ? (int?)null : (int)sl.PackageOfferId,
+                        PackageOfferName: sl.PackageOfferName == null || sl.PackageOfferName is DBNull
+                            ? null : (string)sl.PackageOfferName,
+                        PackageGroupId: sl.PackageGroupId == null || sl.PackageGroupId is DBNull
+                            ? (Guid?)null : (Guid)sl.PackageGroupId
                     ));
                 }
             }

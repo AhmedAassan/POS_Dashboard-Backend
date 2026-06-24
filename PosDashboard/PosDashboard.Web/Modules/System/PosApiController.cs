@@ -222,12 +222,72 @@ namespace PosDashboard.Web.Modules.System
                     })
                     .ToList();
 
+                // -------- Offers (OFFER packages + their services) --------
+                var offerRows = SqlMapper.Query(conn, @"
+                    SELECT
+                        p.Id          AS PackageOfferId,
+                        p.EnglishName AS NameEn,
+                        p.ArabicName  AS NameAr,
+                        p.Amount      AS Amount,
+                        ISNULL(p.NoOfDays, 0) AS NoOfDays,
+                        pi.ItemUnitId AS ItemUnitId,
+                        iu.ITEM_ID    AS ItemId,
+                        i.ITEM_NAME1  AS ItemNameEn,
+                        i.ITEM_NAME2  AS ItemNameAr,
+                        iu.UNIT_ID    AS UnitId,
+                        u.UNIT_NAME1  AS UnitNameEn,
+                        u.UNIT_NAME2  AS UnitNameAr,
+                        iu.ITEM_UNIT_PRICE AS ItemPrice,
+                        CAST(iu.ITEM_UNIT_DURATION AS float) AS DurationMinutes
+                    FROM dbo.Packages p
+                    INNER JOIN dbo.PackageItems pi ON pi.PackageId = p.Id AND ISNULL(pi.Deleted,0) = 0
+                    INNER JOIN dbo.ITEM_UNIT iu    ON iu.ITEM_UNIT_ID = pi.ItemUnitId AND iu.Active = 1
+                    INNER JOIN dbo.ITEM i          ON i.ITEM_ID = iu.ITEM_ID
+                    INNER JOIN dbo.UNIT u          ON u.UNIT_ID = iu.UNIT_ID
+                    WHERE ISNULL(p.OFFER, 0) = 1
+                      AND ISNULL(p.Deleted, 0) = 0
+                      AND ISNULL(p.Active, 1) = 1
+                      AND (p.BranchId = @BranchId OR p.BranchId IS NULL)
+                    ORDER BY p.Id, pi.Id",
+                    new { BranchId = resolvedBranchId }).ToList();
+
+                var offers = offerRows
+                    .GroupBy(r => (int)r.PackageOfferId)
+                    .Select(g =>
+                    {
+                        var first = g.First();
+                        var items = g.Select(r => new PosDtos.PosOfferItemDto(
+                            ItemUnitId: (int)r.ItemUnitId,
+                            ItemId: (int)r.ItemId,
+                            ItemNameEn: (string?)r.ItemNameEn ?? "",
+                            ItemNameAr: (string?)r.ItemNameAr ?? (string?)r.ItemNameEn ?? "",
+                            UnitId: (int)r.UnitId,
+                            UnitNameEn: (string?)r.UnitNameEn ?? "",
+                            UnitNameAr: (string?)r.UnitNameAr ?? (string?)r.UnitNameEn ?? "",
+                            ItemPrice: (decimal)(r.ItemPrice ?? 0m),
+                            DurationMinutes: (double)(r.DurationMinutes ?? 0d))).ToList();
+
+                        decimal amount = (decimal)first.Amount;
+                        decimal realValue = items.Sum(x => x.ItemPrice);
+                        return new PosDtos.PosOfferDto(
+                            PackageOfferId: g.Key,
+                            NameEn: (string?)first.NameEn ?? "",
+                            NameAr: (string?)first.NameAr ?? (string?)first.NameEn ?? "",
+                            Amount: amount,
+                            NoOfDays: (int)(first.NoOfDays ?? 0),
+                            TotalRealValue: realValue,
+                            Savings: Math.Max(0m, realValue - amount),
+                            Items: items);
+                    })
+                    .ToList();
+
                 var dto = new PosDtos.PosCatalogDto(
                     Branch: branchDto,
                     Categories: categories,
                     Services: services,
                     Staff: staff,
-                    PaymentTypes: paymentTypes);
+                    PaymentTypes: paymentTypes,
+                    Offers: offers);
 
                 return Ok(new PosDtos.ApiResult<PosDtos.PosCatalogDto>(true, null, dto));
             }
@@ -248,15 +308,17 @@ namespace PosDashboard.Web.Modules.System
             try
             {
                 if (request == null) return FailCheckout("Request body is required");
-                if (request.Lines == null || request.Lines.Count == 0)
-                    return FailCheckout("At least one service line is required");
+                bool hasLines = request.Lines != null && request.Lines.Count > 0;
+                bool hasPackages = request.Packages != null && request.Packages.Count > 0;
+                if (!hasLines && !hasPackages)
+                    return FailCheckout("At least one service line or package is required");
 
                 using var conn = sqlConnections.NewByKey("Default");
                 if (conn.State != ConnectionState.Open) conn.Open();
 
                 // -------- Branch --------
                 var branch = SqlMapper.Query(conn, @"
-                    SELECT BRANCH_ID, EnglishCurrencyName, ArabicCurrencyName
+                    SELECT BRANCH_ID, EnglishCurrencyName, ArabicCurrencyName, RoundOfDigits
                     FROM dbo.BRANCH
                     WHERE BRANCH_ID = @Id
                       AND (BRANCH_IS_ACTIVE = 1 OR BRANCH_IS_ACTIVE IS NULL)",
@@ -265,6 +327,7 @@ namespace PosDashboard.Web.Modules.System
                 if (branch == null) return FailCheckout("Branch not found or inactive");
                 string currency = (string?)branch.EnglishCurrencyName ?? "KWD";
                 string currencyAr = (string?)branch.ArabicCurrencyName ?? currency;
+                int roundDigits = (int)(branch.RoundOfDigits ?? 3);
 
                 // -------- Customer --------
                 var customer = SqlMapper.Query(conn, @"
@@ -293,11 +356,12 @@ namespace PosDashboard.Web.Modules.System
                 var saleDate = DateTime.UtcNow.AddHours(tzOffset).Date;
                 var cursor = NearestSlotNow(DateTime.UtcNow.AddHours(tzOffset), startHour, endHour, slot);
 
-                // -------- Resolve lines --------
-                var resolved = new List<ResolvedLine>(request.Lines.Count);
-                for (int i = 0; i < request.Lines.Count; i++)
+                // -------- Resolve standalone (extra) lines --------
+                var requestLines = request.Lines ?? new List<PosDtos.PosCheckoutLineRequest>();
+                var resolved = new List<ResolvedLine>(requestLines.Count);
+                for (int i = 0; i < requestLines.Count; i++)
                 {
-                    var line = request.Lines[i];
+                    var line = requestLines[i];
                     if (line == null) return FailCheckout($"Line #{i + 1} is null");
 
                     var staff = SqlMapper.Query(conn, @"
@@ -354,6 +418,85 @@ namespace PosDashboard.Web.Modules.System
                         Notes = string.IsNullOrWhiteSpace(line.Notes) ? null : line.Notes.Trim()
                     });
                 }
+
+                // -------- Resolve PACKAGE (offer) lines --------
+                var reqPackages = request.Packages ?? new List<PosDtos.PosCheckoutPackageRequest>();
+                foreach (var pkgReq in reqPackages)
+                {
+                    if (pkgReq == null || pkgReq.Lines == null || pkgReq.Lines.Count == 0)
+                        return FailCheckout("Each package must contain at least one service line");
+
+                    var pkg = SqlMapper.Query(conn, @"
+                        SELECT Id, EnglishName, ArabicName, Amount
+                        FROM dbo.Packages
+                        WHERE Id = @Id AND ISNULL(OFFER,0) = 1 AND ISNULL(Deleted,0) = 0",
+                        new { Id = pkgReq.PackageOfferId }).FirstOrDefault();
+                    if (pkg == null) return FailCheckout($"Package OFFER #{pkgReq.PackageOfferId} not found");
+
+                    string pkgName = (string?)pkg.EnglishName ?? "";
+                    decimal pkgPrice = (decimal)pkg.Amount;
+                    var pkgGroupId = Guid.NewGuid();
+
+                    var pkgItems = SqlMapper.Query(conn, @"
+                        SELECT pi.ItemUnitId, iu.ITEM_ID AS ItemId, iu.UNIT_ID AS UnitId,
+                               i.ITEM_NAME1, i.ITEM_NAME2, iu.ITEM_UNIT_PRICE,
+                               CAST(iu.ITEM_UNIT_DURATION AS float) AS DurationMinutes
+                        FROM dbo.PackageItems pi
+                        INNER JOIN dbo.ITEM_UNIT iu ON iu.ITEM_UNIT_ID = pi.ItemUnitId
+                        INNER JOIN dbo.ITEM i       ON i.ITEM_ID = iu.ITEM_ID
+                        WHERE pi.PackageId = @Id AND ISNULL(pi.Deleted,0) = 0",
+                        new { Id = pkgReq.PackageOfferId })
+                        .ToDictionary(r => (int)r.ItemUnitId, r => r);
+
+                    var pkgLines = new List<ResolvedLine>(pkgReq.Lines.Count);
+                    foreach (var pl in pkgReq.Lines)
+                    {
+                        if (!pkgItems.TryGetValue(pl.ItemUnitId, out var pit))
+                            return FailCheckout($"Service (ItemUnit #{pl.ItemUnitId}) does not belong to package '{pkgName}'");
+
+                        var pstaff = SqlMapper.Query(conn, @"
+                            SELECT Id, ArabicName, EnglishName FROM dbo.STAFF
+                            WHERE Id = @Id AND Active = 1 AND Deleted = 0",
+                            new { Id = pl.StaffId }).FirstOrDefault();
+                        if (pstaff == null) return FailCheckout($"Package '{pkgName}': staff not found or not active");
+
+                        int pdur = ResolveDuration(pl.DurationMinutes, (double?)pit.DurationMinutes, slot);
+                        var pstart = cursor;
+                        var pend = pstart + TimeSpan.FromMinutes(pdur);
+                        if (pend >= TimeSpan.FromDays(1))
+                        {
+                            pstart = TimeSpan.FromHours(startHour);
+                            pend = pstart + TimeSpan.FromMinutes(pdur);
+                        }
+                        cursor = pend;
+
+                        pkgLines.Add(new ResolvedLine
+                        {
+                            Index = resolved.Count + pkgLines.Count,
+                            ItemId = (int)pit.ItemId,
+                            UnitId = (int)pit.UnitId,
+                            StaffId = pl.StaffId,
+                            ItemEnName = (string?)pit.ITEM_NAME1 ?? "",
+                            ItemArName = (string?)pit.ITEM_NAME2 ?? "",
+                            StaffEnName = (string?)pstaff.EnglishName ?? "",
+                            StaffArName = (string?)pstaff.ArabicName ?? "",
+                            DurationMinutes = pdur,
+                            UnitPrice = (decimal)pit.ITEM_UNIT_PRICE,  // catalog price (pre-discount)
+                            SalePrice = 0m,                            // set by distribution below
+                            StartTime = pstart,
+                            EndTime = pend,
+                            Notes = string.IsNullOrWhiteSpace(pl.Notes) ? null : pl.Notes.Trim(),
+                            PackageOfferId = pkgReq.PackageOfferId,
+                            PackageGroupId = pkgGroupId,
+                            PackageOfferName = pkgName
+                        });
+                    }
+
+                    DistributePackagePrice(pkgLines, pkgPrice, roundDigits);
+                    resolved.AddRange(pkgLines);
+                }
+
+                if (resolved.Count == 0) return FailCheckout("Nothing to sell");
 
                 decimal grandTotal = resolved.Sum(x => x.SalePrice);
 
@@ -439,7 +582,8 @@ namespace PosDashboard.Web.Modules.System
                                 NumberOfPersons, ServiceType, IsOnlineBooking, Notes,
                                 UnitPrice, DiscountPercent, DiscountedUnitPrice, TotalPrice,
                                 PaidAmount, PaymentStatus, DepositAmount,
-                                Status, CheckoutStatus, CreatedAt, SaleGroupId, ShowOnCalendar
+                                Status, CheckoutStatus, CreatedAt, SaleGroupId, ShowOnCalendar,
+                                PackageOfferId, PackageGroupId
                             )
                             OUTPUT INSERTED.Id
                             VALUES (
@@ -448,7 +592,8 @@ namespace PosDashboard.Web.Modules.System
                                 1, 'SALON', 0, @Notes,
                                 @UnitPrice, @DiscountPercent, @DiscountedUnitPrice, @TotalPrice,
                                 @PaidAmount, 'FULL', 0,
-                                'completed', 'checked_out', SYSUTCDATETIME(), @SaleGroupId, 0
+                                'completed', 'checked_out', SYSUTCDATETIME(), @SaleGroupId, 0,
+                                @PackageOfferId, @PackageGroupId
                             )",
                             new
                             {
@@ -466,7 +611,9 @@ namespace PosDashboard.Web.Modules.System
                                 DiscountedUnitPrice = rl.SalePrice,
                                 TotalPrice = rl.SalePrice,
                                 PaidAmount = rl.SalePrice,
-                                SaleGroupId = saleGroupId
+                                SaleGroupId = saleGroupId,
+                                rl.PackageOfferId,
+                                rl.PackageGroupId
                             }).First();
 
                         apptIds.Add(newId);
@@ -512,12 +659,14 @@ namespace PosDashboard.Web.Modules.System
                             INSERT INTO dbo.AppointmentInvoiceLines (
                                 InvoiceId, AppointmentId, ItemId, UnitId, StaffId,
                                 UnitPrice, DiscountedUnitPrice, TotalPrice,
-                                AppointmentDate, StartTime, EndTime, DurationMinutes, Notes
+                                AppointmentDate, StartTime, EndTime, DurationMinutes, Notes,
+                                PackageOfferId, PackageGroupId, PackageOfferName
                             )
                             VALUES (
                                 @InvoiceId, @AppointmentId, @ItemId, @UnitId, @StaffId,
                                 @UnitPrice, @DiscountedUnitPrice, @TotalPrice,
-                                @AppointmentDate, @StartTime, @EndTime, @DurationMinutes, @Notes
+                                @AppointmentDate, @StartTime, @EndTime, @DurationMinutes, @Notes,
+                                @PackageOfferId, @PackageGroupId, @PackageOfferName
                             )",
                             new
                             {
@@ -533,7 +682,10 @@ namespace PosDashboard.Web.Modules.System
                                 StartTime = rl.StartTime,
                                 EndTime = rl.EndTime,
                                 rl.DurationMinutes,
-                                rl.Notes
+                                rl.Notes,
+                                rl.PackageOfferId,
+                                rl.PackageGroupId,
+                                rl.PackageOfferName
                             });
                     }
 
@@ -691,7 +843,10 @@ namespace PosDashboard.Web.Modules.System
                         s.EnglishName     AS StaffName,
                         s.ArabicName      AS StaffNameAr,
                         ail.DiscountedUnitPrice AS UnitPrice,
-                        ail.TotalPrice    AS TotalPrice
+                        ail.TotalPrice    AS TotalPrice,
+                        ail.PackageOfferId   AS PackageOfferId,
+                        ail.PackageOfferName AS PackageOfferName,
+                        ail.PackageGroupId   AS PackageGroupId
                     FROM dbo.AppointmentInvoiceLines ail
                     INNER JOIN dbo.ITEM  i ON i.ITEM_ID = ail.ItemId
                     INNER JOIN dbo.STAFF s ON s.Id      = ail.StaffId
@@ -709,7 +864,10 @@ namespace PosDashboard.Web.Modules.System
                         StaffNameAr: (string?)l.StaffNameAr ?? (string?)l.StaffName ?? "",
                         Quantity: 1,
                         UnitPrice: (decimal)l.UnitPrice,
-                        TotalPrice: (decimal)l.TotalPrice))
+                        TotalPrice: (decimal)l.TotalPrice,
+                        PackageOfferId: (int?)l.PackageOfferId,
+                        PackageOfferName: (string?)l.PackageOfferName,
+                        PackageGroupId: (Guid?)l.PackageGroupId))
                     .ToList();
 
                 var payments = SqlMapper.Query(conn, @"
@@ -992,7 +1150,8 @@ namespace PosDashboard.Web.Modules.System
                 var lines = conn.Query<dynamic>(@"
                     SELECT i.ITEM_NAME1 AS ItemEn, i.ITEM_NAME2 AS ItemAr,
                            s.EnglishName AS StaffEn, s.ArabicName AS StaffAr,
-                           ail.DiscountedUnitPrice AS UnitPrice, ail.TotalPrice AS TotalPrice
+                           ail.DiscountedUnitPrice AS UnitPrice, ail.TotalPrice AS TotalPrice,
+                           ail.PackageGroupId AS PackageGroupId, ail.PackageOfferName AS PackageOfferName
                     FROM dbo.AppointmentInvoiceLines ail
                     INNER JOIN dbo.ITEM  i ON i.ITEM_ID = ail.ItemId
                     INNER JOIN dbo.STAFF s ON s.Id      = ail.StaffId
@@ -1008,7 +1167,11 @@ namespace PosDashboard.Web.Modules.System
                         StaffName = (string)(ln.StaffEn ?? ln.StaffAr ?? ""),
                         Quantity = 1,
                         UnitPrice = (decimal)ln.UnitPrice,
-                        TotalPrice = (decimal)ln.TotalPrice
+                        TotalPrice = (decimal)ln.TotalPrice,
+                        PackageGroupId = ln.PackageGroupId == null || ln.PackageGroupId is DBNull
+                            ? (Guid?)null : (Guid)ln.PackageGroupId,
+                        PackageOfferName = ln.PackageOfferName == null || ln.PackageOfferName is DBNull
+                            ? null : (string)ln.PackageOfferName
                     });
                 }
 
@@ -1043,6 +1206,36 @@ namespace PosDashboard.Web.Modules.System
             public TimeSpan StartTime { get; set; }
             public TimeSpan EndTime { get; set; }
             public string? Notes { get; set; }
+            public int? PackageOfferId { get; set; }
+            public Guid? PackageGroupId { get; set; }
+            public string? PackageOfferName { get; set; }
+        }
+
+        // Distributes a fixed package price across its lines so the line totals
+        // sum EXACTLY to the package price (proportional to each line's catalog
+        // price; the last line absorbs the rounding remainder).
+        private static void DistributePackagePrice(List<ResolvedLine> lines, decimal packagePrice, int digits)
+        {
+            if (lines.Count == 0) return;
+            if (digits < 0) digits = 3;
+
+            decimal baseSum = lines.Sum(l => l.UnitPrice);
+            decimal allocated = 0m;
+
+            for (int i = 0; i < lines.Count; i++)
+            {
+                decimal share;
+                if (i == lines.Count - 1)
+                    share = packagePrice - allocated;                 // last line = remainder
+                else if (baseSum > 0m)
+                    share = Math.Round(packagePrice * (lines[i].UnitPrice / baseSum), digits, MidpointRounding.AwayFromZero);
+                else
+                    share = Math.Round(packagePrice / lines.Count, digits, MidpointRounding.AwayFromZero);
+
+                if (share < 0m) share = 0m;
+                lines[i].SalePrice = share;
+                allocated += share;
+            }
         }
     }
 }
