@@ -241,6 +241,26 @@ namespace PosDashboard.Web.Modules.System.Models
             string? CancellationReason
         );
 
+        /// <summary>A printable POS service label attached to this invoice (Phase 1).</summary>
+        public record InvoiceLabelDto(
+            int LabelId,
+            int InvoiceId,
+            int AppointmentId,
+            int? InvoiceLineId,
+            int LabelNumber,
+            int ItemId,
+            string ServiceName,
+            string ServiceNameAr,
+            decimal Price,
+            string Currency,
+            string Barcode,
+            string QrPayload,
+            DateTime CreatedAt,
+            bool IsAssigned,
+            int? AssignedStaffId,
+            string? AssignedStaffName
+        );
+
         public record DetailedInvoiceDto(
             int Id,
             string InvoiceNumber,
@@ -260,7 +280,9 @@ namespace PosDashboard.Web.Modules.System.Models
             decimal TotalRefunded,
             bool IsFullyRefunded,
             bool IsPartiallyRefunded,
-            List<RefundLineDto> RefundLines
+            List<RefundLineDto> RefundLines,
+            // POS service labels (un-staffed services). Empty for normal invoices.
+            List<InvoiceLabelDto>? Labels = null
         );
 
         /*split payment history*/

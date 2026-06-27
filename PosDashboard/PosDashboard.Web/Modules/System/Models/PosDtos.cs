@@ -122,7 +122,7 @@ namespace PosDashboard.Web.Modules.System.Models
         public record PosCheckoutLineRequest(
             int ItemId,
             int UnitId,
-            int StaffId,
+            int? StaffId,                  // null / 0 = NO staff -> generates a printable label (Phase 1)
             int? DurationMinutes,          // optional override
             decimal? UnitPriceOverride,    // optional sale-only price (discount). Never written to master.
             string? Notes
@@ -145,7 +145,7 @@ namespace PosDashboard.Web.Modules.System.Models
         // ItemUnitId must belong to PackageOfferId; StaffId is per-service.
         public record PosCheckoutPackageLineRequest(
             int ItemUnitId,
-            int StaffId,
+            int? StaffId,                  // null / 0 = NO staff -> generates a printable label (Phase 1)
             int? DurationMinutes,
             string? Notes
         );
@@ -167,6 +167,30 @@ namespace PosDashboard.Web.Modules.System.Models
             List<PosCheckoutPackageRequest>? Packages = null   // selected OFFER packages
         );
 
+        // =====================================================================
+        // Printable service label (Phase 1)
+        // One label per un-staffed service line: QR + 8-digit barcode + the
+        // service name/price/date/time + its order (LabelNumber) in the invoice.
+        // =====================================================================
+        public record PosLabelDto(
+            int LabelId,
+            int InvoiceId,
+            int AppointmentId,
+            int? InvoiceLineId,
+            int LabelNumber,            // 1-based order of the service within the invoice
+            int ItemId,
+            string ServiceName,
+            string ServiceNameAr,
+            decimal Price,
+            string Currency,
+            string Barcode,             // 8-digit numeric (also what the QR encodes)
+            string QrPayload,
+            DateTime CreatedAt,         // sale date/time printed on the label
+            bool IsAssigned,
+            int? AssignedStaffId,
+            string? AssignedStaffName
+        );
+
         public record PosCheckoutResponse(
             int InvoiceId,
             string InvoiceNumber,
@@ -181,7 +205,8 @@ namespace PosDashboard.Web.Modules.System.Models
             string Currency,
             bool WhatsAppSent,
             string? WhatsAppError,
-            string? InvoicePdfUrl
+            string? InvoicePdfUrl,
+            List<PosLabelDto> Labels       // un-staffed service labels (empty when every line had a staff)
         );
 
         // =====================================================================
@@ -193,10 +218,10 @@ namespace PosDashboard.Web.Modules.System.Models
             int? Id,
             int AppointmentId,
             int ItemId,
-            int StaffId,
+            int? StaffId,               // null = no staff yet (un-staffed POS line)
             string ItemName,
             string ItemNameAr,
-            string StaffName,
+            string StaffName,           // "" when un-staffed
             string StaffNameAr,
             int Quantity,
             decimal UnitPrice,
@@ -241,7 +266,8 @@ namespace PosDashboard.Web.Modules.System.Models
             List<PosReceiptLineDto> Lines,
             List<PosReceiptPaymentDto> Payments,
             PosCompanyInfoDto? Company,
-            string? InvoicePdfUrl
+            string? InvoicePdfUrl,
+            List<PosLabelDto> Labels       // labels for this invoice (empty when none)
         );
     }
 }

@@ -1330,7 +1330,7 @@ namespace PosDashboard.Web.Modules.System
         FROM dbo.AppointmentInvoiceLines ail
         INNER JOIN dbo.ITEM i
             ON i.ITEM_ID = ail.ItemId
-        INNER JOIN dbo.STAFF s
+        LEFT JOIN dbo.STAFF s
             ON s.Id = ail.StaffId
         INNER JOIN dbo.AppointmentData a
             ON a.Id = ail.AppointmentId
@@ -1353,7 +1353,7 @@ namespace PosDashboard.Web.Modules.System
                         Id: (int)sl.Id,
                         AppointmentId: (int)sl.AppointmentId,
                         ItemId: (int)sl.ItemId,
-                        StaffId: (int)sl.StaffId,
+                        StaffId: (sl.StaffId == null || sl.StaffId is DBNull) ? (int?)null : (int)sl.StaffId,
                         IsRefunded: (bool)sl.IsRefunded,
                         ItemName: (string)(sl.ItemName ?? ""),
                         ItemNameAr: (string)(sl.ItemNameAr ?? ""),
@@ -1392,7 +1392,7 @@ namespace PosDashboard.Web.Modules.System
                 ON i.ITEM_ID = a.ItemId
             INNER JOIN dbo.CUSTOMER c
                 ON c.CUSTOMER_ID = a.CustomerId
-            INNER JOIN dbo.STAFF s
+            LEFT JOIN dbo.STAFF s
                 ON s.Id = a.StaffId
             WHERE a.Id = @Id",
                     new { Id = (int)invoice.AppointmentId }).FirstOrDefault();
@@ -1435,7 +1435,7 @@ namespace PosDashboard.Web.Modules.System
                 ON i.ITEM_ID = ci.ItemId
             INNER JOIN dbo.CUSTOMER c
                 ON c.CUSTOMER_ID = ci.CustomerId
-            INNER JOIN dbo.STAFF s
+            LEFT JOIN dbo.STAFF s
                 ON s.Id = ci.StaffId
             WHERE ci.AppointmentId = @Id
             ORDER BY ci.CreatedAt",
@@ -1447,7 +1447,7 @@ namespace PosDashboard.Web.Modules.System
                         Id: (int)extra.Id,
                         AppointmentId: (int)invoice.AppointmentId,
                         ItemId: (int)extra.ItemId,
-                        StaffId: (int)extra.StaffId,
+                        StaffId: (extra.StaffId == null || extra.StaffId is DBNull) ? (int?)null : (int)extra.StaffId,
                         IsRefunded: (bool)extra.IsRefunded,
                         ItemName: (string)(extra.ItemName ?? ""),
                         ItemNameAr: (string)(extra.ItemNameAr ?? ""),
@@ -1532,6 +1532,56 @@ namespace PosDashboard.Web.Modules.System
             bool isFullyRefunded = invoice.IsFullyRefunded != null && Convert.ToBoolean(invoice.IsFullyRefunded);
             bool isPartiallyRefunded = invoice.IsPartiallyRefunded != null && Convert.ToBoolean(invoice.IsPartiallyRefunded);
 
+            // ── POS service labels (Phase 1) — un-staffed services on this invoice ──
+            // Wrapped defensively: environments without the PosServiceLabels table
+            // (migration not applied yet) simply return no labels instead of failing.
+            var labels = new List<InvoiceLabelDto>();
+            try
+            {
+                string invCurrency = (string)invoice.Currency;
+                labels = SqlMapper.Query(conn, @"
+                    SELECT
+                        l.Id            AS LabelId,
+                        l.InvoiceId     AS InvoiceId,
+                        l.AppointmentId AS AppointmentId,
+                        l.InvoiceLineId AS InvoiceLineId,
+                        l.LabelNumber   AS LabelNumber,
+                        l.ItemId        AS ItemId,
+                        l.ServiceName   AS ServiceName,
+                        l.ServiceNameAr AS ServiceNameAr,
+                        l.Price         AS Price,
+                        l.Barcode       AS Barcode,
+                        l.QrPayload     AS QrPayload,
+                        l.CreatedAt     AS CreatedAt,
+                        ISNULL(l.IsAssigned, 0) AS IsAssigned,
+                        l.AssignedStaffId       AS AssignedStaffId,
+                        s.EnglishName           AS AssignedStaffName
+                    FROM dbo.PosServiceLabels l
+                    LEFT JOIN dbo.STAFF s ON s.Id = l.AssignedStaffId
+                    WHERE l.InvoiceId = @InvoiceId
+                    ORDER BY l.LabelNumber",
+                    new { InvoiceId = invoiceId })
+                    .Select(l => new InvoiceLabelDto(
+                        LabelId: (int)l.LabelId,
+                        InvoiceId: (int)l.InvoiceId,
+                        AppointmentId: (int)l.AppointmentId,
+                        InvoiceLineId: (l.InvoiceLineId == null || l.InvoiceLineId is DBNull) ? (int?)null : (int)l.InvoiceLineId,
+                        LabelNumber: (int)l.LabelNumber,
+                        ItemId: (int)l.ItemId,
+                        ServiceName: (string)(l.ServiceName ?? ""),
+                        ServiceNameAr: (string)(l.ServiceNameAr ?? ""),
+                        Price: (decimal)l.Price,
+                        Currency: invCurrency,
+                        Barcode: (string)(l.Barcode ?? ""),
+                        QrPayload: (string)(l.QrPayload ?? (l.Barcode ?? "")),
+                        CreatedAt: (DateTime)l.CreatedAt,
+                        IsAssigned: Convert.ToBoolean(l.IsAssigned),
+                        AssignedStaffId: (l.AssignedStaffId == null || l.AssignedStaffId is DBNull) ? (int?)null : (int)l.AssignedStaffId,
+                        AssignedStaffName: (l.AssignedStaffName == null || l.AssignedStaffName is DBNull) ? null : (string?)l.AssignedStaffName
+                    )).ToList();
+            }
+            catch { /* table may not exist yet — ignore */ }
+
             var dto = new DetailedInvoiceDto(
                 Id: invoiceId,
                 InvoiceNumber: (string)invoice.InvoiceNumber,
@@ -1552,7 +1602,8 @@ namespace PosDashboard.Web.Modules.System
                 TotalRefunded: totalRefunded,
                 IsFullyRefunded: isFullyRefunded,
                 IsPartiallyRefunded: isPartiallyRefunded,
-                RefundLines: refundLines
+                RefundLines: refundLines,
+                Labels: labels
             );
 
             return Ok(new ApiResult<DetailedInvoiceDto>(true, null, dto));
@@ -1594,7 +1645,7 @@ namespace PosDashboard.Web.Modules.System
                        s.EnglishName AS StaffName, s.ArabicName AS StaffNameAr
                 FROM dbo.AppointmentInvoiceLines ail
                 INNER JOIN dbo.ITEM  i ON i.ITEM_ID = ail.ItemId
-                INNER JOIN dbo.STAFF s ON s.Id      = ail.StaffId
+                LEFT JOIN dbo.STAFF s ON s.Id      = ail.StaffId
                 WHERE ail.InvoiceId = @InvoiceId
                 ORDER BY ail.Id",
                 new { InvoiceId = invoiceId }).ToList();
@@ -1609,7 +1660,7 @@ namespace PosDashboard.Web.Modules.System
                         ItemId: (int)sl.ItemId,
                         ItemName: (string)(sl.ItemName ?? ""),
                         ItemNameAr: (string)(sl.ItemNameAr ?? ""),
-                        StaffId: (int)sl.StaffId,
+                        StaffId: (sl.StaffId == null || sl.StaffId is DBNull) ? 0 : (int)sl.StaffId,
                         StaffName: (string)(sl.StaffName ?? ""),
                         StaffNameAr: (string)(sl.StaffNameAr ?? ""),
                         IsRefunded: (bool)sl.IsRefunded));
@@ -1623,7 +1674,7 @@ namespace PosDashboard.Web.Modules.System
                            s.EnglishName AS StaffName, s.ArabicName AS StaffNameAr
                     FROM dbo.AppointmentData a
                     INNER JOIN dbo.ITEM  i ON i.ITEM_ID = a.ItemId
-                    INNER JOIN dbo.STAFF s ON s.Id      = a.StaffId
+                    LEFT JOIN dbo.STAFF s ON s.Id      = a.StaffId
                     WHERE a.Id = @Id",
                     new { Id = leadApptId }).FirstOrDefault();
 
@@ -1635,7 +1686,7 @@ namespace PosDashboard.Web.Modules.System
                         ItemId: (int)orig.ItemId,
                         ItemName: (string)(orig.ItemName ?? ""),
                         ItemNameAr: (string)(orig.ItemNameAr ?? ""),
-                        StaffId: (int)orig.StaffId,
+                        StaffId: (orig.StaffId == null || orig.StaffId is DBNull) ? 0 : (int)orig.StaffId,
                         StaffName: (string)(orig.StaffName ?? ""),
                         StaffNameAr: (string)(orig.StaffNameAr ?? ""),
                         IsRefunded: false));
@@ -1648,7 +1699,7 @@ namespace PosDashboard.Web.Modules.System
                            s.EnglishName AS StaffName, s.ArabicName AS StaffNameAr
                     FROM dbo.AppointmentCheckoutItems ci
                     INNER JOIN dbo.ITEM  i ON i.ITEM_ID = ci.ItemId
-                    INNER JOIN dbo.STAFF s ON s.Id      = ci.StaffId
+                    LEFT JOIN dbo.STAFF s ON s.Id      = ci.StaffId
                     WHERE ci.AppointmentId = @Id
                     ORDER BY ci.CreatedAt",
                     new { Id = leadApptId }).ToList();
@@ -1661,7 +1712,7 @@ namespace PosDashboard.Web.Modules.System
                         ItemId: (int)ex.ItemId,
                         ItemName: (string)(ex.ItemName ?? ""),
                         ItemNameAr: (string)(ex.ItemNameAr ?? ""),
-                        StaffId: (int)ex.StaffId,
+                        StaffId: (ex.StaffId == null || ex.StaffId is DBNull) ? 0 : (int)ex.StaffId,
                         StaffName: (string)(ex.StaffName ?? ""),
                         StaffNameAr: (string)(ex.StaffNameAr ?? ""),
                         IsRefunded: (bool)ex.IsRefunded));
@@ -2037,7 +2088,7 @@ namespace PosDashboard.Web.Modules.System
                     ON c.CUSTOMER_ID = a.CustomerId
                 INNER JOIN dbo.ITEM i
                     ON i.ITEM_ID = a.ItemId
-                INNER JOIN dbo.STAFF s
+                LEFT JOIN dbo.STAFF s
                     ON s.Id = a.StaffId
 
                 -- Resolve invoice in this priority:
@@ -2095,7 +2146,7 @@ namespace PosDashboard.Web.Modules.System
                 ItemEnName: (string)(row.ItemEnName ?? ""),
                 ItemArName: (string)(row.ItemArName ?? ""),
                 UnitId: (int)row.UnitId,
-                StaffId: (int)row.StaffId,
+                StaffId: (row.StaffId == null || row.StaffId is DBNull) ? 0 : (int)row.StaffId,
                 StaffEnName: (string)(row.StaffEnName ?? ""),
                 StaffArName: (string)(row.StaffArName ?? ""),
                 AppointmentDate: (string)row.AppointmentDate,
@@ -2316,7 +2367,7 @@ namespace PosDashboard.Web.Modules.System
         FROM dbo.AppointmentCheckoutItems ci
         INNER JOIN dbo.ITEM i ON i.ITEM_ID = ci.ItemId
         INNER JOIN dbo.CUSTOMER c ON c.CUSTOMER_ID = ci.CustomerId
-        INNER JOIN dbo.STAFF s ON s.Id = ci.StaffId
+        LEFT JOIN dbo.STAFF s ON s.Id = ci.StaffId
         WHERE ci.AppointmentId = @Id
         ORDER BY ci.CreatedAt",
                 new { Id = appointmentId })
@@ -2332,7 +2383,7 @@ namespace PosDashboard.Web.Modules.System
                     CustomerPhone: (string)(row.CustomerPhone ?? ""),
                     CustomerHasAlert: (bool)row.CustomerHasAlert,
                     CustomerAlertNote: (string?)row.CustomerAlertNote,
-                    StaffId: (int)row.StaffId,
+                    StaffId: (row.StaffId == null || row.StaffId is DBNull) ? 0 : (int)row.StaffId,
                     StaffEnName: (string)(row.StaffEnName ?? ""),
                     StaffArName: (string)(row.StaffArName ?? ""),
                     UnitPrice: (decimal)row.UnitPrice,

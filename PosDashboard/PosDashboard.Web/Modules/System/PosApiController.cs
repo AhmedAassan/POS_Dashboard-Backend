@@ -364,12 +364,21 @@ namespace PosDashboard.Web.Modules.System
                     var line = requestLines[i];
                     if (line == null) return FailCheckout($"Line #{i + 1} is null");
 
-                    var staff = SqlMapper.Query(conn, @"
-                        SELECT Id, ArabicName, EnglishName
-                        FROM dbo.STAFF
-                        WHERE Id = @Id AND Active = 1 AND Deleted = 0",
-                        new { Id = line.StaffId }).FirstOrDefault();
-                    if (staff == null) return FailCheckout($"Line #{i + 1}: staff not found or not active");
+                    // Staff is OPTIONAL now. null / 0 => sell without a staff member;
+                    // a printable label is generated and the staff is assigned later (Phase 2).
+                    int? lineStaffId = (line.StaffId.HasValue && line.StaffId.Value > 0) ? line.StaffId : null;
+                    string staffEn = "", staffAr = "";
+                    if (lineStaffId.HasValue)
+                    {
+                        var staff = SqlMapper.Query(conn, @"
+                            SELECT Id, ArabicName, EnglishName
+                            FROM dbo.STAFF
+                            WHERE Id = @Id AND Active = 1 AND Deleted = 0",
+                            new { Id = lineStaffId.Value }).FirstOrDefault();
+                        if (staff == null) return FailCheckout($"Line #{i + 1}: staff not found or not active");
+                        staffEn = (string?)staff.EnglishName ?? "";
+                        staffAr = (string?)staff.ArabicName ?? "";
+                    }
 
                     var item = SqlMapper.Query(conn, @"
                         SELECT iu.ITEM_ID, i.ITEM_NAME1, i.ITEM_NAME2,
@@ -405,11 +414,11 @@ namespace PosDashboard.Web.Modules.System
                         Index = i,
                         ItemId = line.ItemId,
                         UnitId = line.UnitId,
-                        StaffId = line.StaffId,
+                        StaffId = lineStaffId,
                         ItemEnName = (string?)item.ITEM_NAME1 ?? "",
                         ItemArName = (string?)item.ITEM_NAME2 ?? "",
-                        StaffEnName = (string?)staff.EnglishName ?? "",
-                        StaffArName = (string?)staff.ArabicName ?? "",
+                        StaffEnName = staffEn,
+                        StaffArName = staffAr,
                         DurationMinutes = duration,
                         UnitPrice = masterPrice,
                         SalePrice = salePrice,
@@ -454,11 +463,19 @@ namespace PosDashboard.Web.Modules.System
                         if (!pkgItems.TryGetValue(pl.ItemUnitId, out var pit))
                             return FailCheckout($"Service (ItemUnit #{pl.ItemUnitId}) does not belong to package '{pkgName}'");
 
-                        var pstaff = SqlMapper.Query(conn, @"
-                            SELECT Id, ArabicName, EnglishName FROM dbo.STAFF
-                            WHERE Id = @Id AND Active = 1 AND Deleted = 0",
-                            new { Id = pl.StaffId }).FirstOrDefault();
-                        if (pstaff == null) return FailCheckout($"Package '{pkgName}': staff not found or not active");
+                        // Staff optional inside packages too (un-staffed -> label).
+                        int? pkgLineStaffId = (pl.StaffId.HasValue && pl.StaffId.Value > 0) ? pl.StaffId : null;
+                        string pStaffEn = "", pStaffAr = "";
+                        if (pkgLineStaffId.HasValue)
+                        {
+                            var pstaff = SqlMapper.Query(conn, @"
+                                SELECT Id, ArabicName, EnglishName FROM dbo.STAFF
+                                WHERE Id = @Id AND Active = 1 AND Deleted = 0",
+                                new { Id = pkgLineStaffId.Value }).FirstOrDefault();
+                            if (pstaff == null) return FailCheckout($"Package '{pkgName}': staff not found or not active");
+                            pStaffEn = (string?)pstaff.EnglishName ?? "";
+                            pStaffAr = (string?)pstaff.ArabicName ?? "";
+                        }
 
                         int pdur = ResolveDuration(pl.DurationMinutes, (double?)pit.DurationMinutes, slot);
                         var pstart = cursor;
@@ -475,11 +492,11 @@ namespace PosDashboard.Web.Modules.System
                             Index = resolved.Count + pkgLines.Count,
                             ItemId = (int)pit.ItemId,
                             UnitId = (int)pit.UnitId,
-                            StaffId = pl.StaffId,
+                            StaffId = pkgLineStaffId,
                             ItemEnName = (string?)pit.ITEM_NAME1 ?? "",
                             ItemArName = (string?)pit.ITEM_NAME2 ?? "",
-                            StaffEnName = (string?)pstaff.EnglishName ?? "",
-                            StaffArName = (string?)pstaff.ArabicName ?? "",
+                            StaffEnName = pStaffEn,
+                            StaffArName = pStaffAr,
                             DurationMinutes = pdur,
                             UnitPrice = (decimal)pit.ITEM_UNIT_PRICE,  // catalog price (pre-discount)
                             SalePrice = 0m,                            // set by distribution below
@@ -652,16 +669,18 @@ namespace PosDashboard.Web.Modules.System
                         }).First();
 
                     // 3) Invoice lines
+                    var invoiceLineIds = new List<int?>(resolved.Count);
                     for (int idx = 0; idx < resolved.Count; idx++)
                     {
                         var rl = resolved[idx];
-                        SqlMapper.Execute(uow.Connection, @"
+                        int newLineId = SqlMapper.Query<int>(uow.Connection, @"
                             INSERT INTO dbo.AppointmentInvoiceLines (
                                 InvoiceId, AppointmentId, ItemId, UnitId, StaffId,
                                 UnitPrice, DiscountedUnitPrice, TotalPrice,
                                 AppointmentDate, StartTime, EndTime, DurationMinutes, Notes,
                                 PackageOfferId, PackageGroupId, PackageOfferName
                             )
+                            OUTPUT INSERTED.Id
                             VALUES (
                                 @InvoiceId, @AppointmentId, @ItemId, @UnitId, @StaffId,
                                 @UnitPrice, @DiscountedUnitPrice, @TotalPrice,
@@ -686,7 +705,65 @@ namespace PosDashboard.Web.Modules.System
                                 rl.PackageOfferId,
                                 rl.PackageGroupId,
                                 rl.PackageOfferName
-                            });
+                            }).First();
+                        invoiceLineIds.Add(newLineId);
+                    }
+
+                    // 3b) Service labels — one per UN-STAFFED line (Phase 1).
+                    //     LabelNumber follows the service order within the invoice.
+                    var labels = new List<PosDtos.PosLabelDto>();
+                    for (int idx = 0; idx < resolved.Count; idx++)
+                    {
+                        var rl = resolved[idx];
+                        if (rl.StaffId.HasValue && rl.StaffId.Value > 0) continue;   // staffed -> no label
+
+                        string barcode = GenerateUniqueBarcode(uow.Connection);
+                        int labelNumber = idx + 1;
+
+                        int labelId = SqlMapper.Query<int>(uow.Connection, @"
+                            INSERT INTO dbo.PosServiceLabels (
+                                InvoiceId, AppointmentId, InvoiceLineId, LabelNumber, BranchId,
+                                ItemId, ServiceName, ServiceNameAr, Price,
+                                Barcode, QrPayload, IsAssigned, PrintCount, CreatedAt
+                            )
+                            OUTPUT INSERTED.Id
+                            VALUES (
+                                @InvoiceId, @AppointmentId, @InvoiceLineId, @LabelNumber, @BranchId,
+                                @ItemId, @ServiceName, @ServiceNameAr, @Price,
+                                @Barcode, @QrPayload, 0, 0, SYSUTCDATETIME()
+                            )",
+                            new
+                            {
+                                InvoiceId = invoiceId,
+                                AppointmentId = apptIds[idx],
+                                InvoiceLineId = invoiceLineIds[idx],
+                                LabelNumber = labelNumber,
+                                BranchId = request.BranchId,
+                                rl.ItemId,
+                                ServiceName = rl.ItemEnName,
+                                ServiceNameAr = rl.ItemArName,
+                                Price = rl.SalePrice,
+                                Barcode = barcode,
+                                QrPayload = barcode
+                            }).First();
+
+                        labels.Add(new PosDtos.PosLabelDto(
+                            LabelId: labelId,
+                            InvoiceId: invoiceId,
+                            AppointmentId: apptIds[idx],
+                            InvoiceLineId: invoiceLineIds[idx],
+                            LabelNumber: labelNumber,
+                            ItemId: rl.ItemId,
+                            ServiceName: rl.ItemEnName,
+                            ServiceNameAr: rl.ItemArName,
+                            Price: rl.SalePrice,
+                            Currency: currency,
+                            Barcode: barcode,
+                            QrPayload: barcode,
+                            CreatedAt: DateTime.UtcNow,
+                            IsAssigned: false,
+                            AssignedStaffId: null,
+                            AssignedStaffName: null));
                     }
 
                     // 4) Wallet payment + ledger
@@ -776,7 +853,8 @@ namespace PosDashboard.Web.Modules.System
                         Currency: currency,
                         WhatsAppSent: waSent,
                         WhatsAppError: waErr,
-                        InvoicePdfUrl: pdfUrl);
+                        InvoicePdfUrl: pdfUrl,
+                        Labels: labels);
 
                     return Ok(new PosDtos.ApiResult<PosDtos.PosCheckoutResponse>(true, null, response));
                 }
@@ -849,7 +927,7 @@ namespace PosDashboard.Web.Modules.System
                         ail.PackageGroupId   AS PackageGroupId
                     FROM dbo.AppointmentInvoiceLines ail
                     INNER JOIN dbo.ITEM  i ON i.ITEM_ID = ail.ItemId
-                    INNER JOIN dbo.STAFF s ON s.Id      = ail.StaffId
+                    LEFT  JOIN dbo.STAFF s ON s.Id      = ail.StaffId
                     WHERE ail.InvoiceId = @InvoiceId AND ISNULL(ail.IsRefunded, 0) = 0
                     ORDER BY ail.Id",
                     new { InvoiceId = invoiceId })
@@ -857,7 +935,7 @@ namespace PosDashboard.Web.Modules.System
                         Id: (int?)l.Id,
                         AppointmentId: (int)l.AppointmentId,
                         ItemId: (int)l.ItemId,
-                        StaffId: (int)l.StaffId,
+                        StaffId: (int?)l.StaffId,
                         ItemName: (string?)l.ItemName ?? "",
                         ItemNameAr: (string?)l.ItemNameAr ?? (string?)l.ItemName ?? "",
                         StaffName: (string?)l.StaffName ?? "",
@@ -916,6 +994,48 @@ namespace PosDashboard.Web.Modules.System
                         Footer2: (string?)company.Footer2);
                 }
 
+                // -------- Labels (un-staffed service lines) --------
+                var labels = SqlMapper.Query(conn, @"
+                    SELECT
+                        lbl.Id            AS LabelId,
+                        lbl.InvoiceId     AS InvoiceId,
+                        lbl.AppointmentId AS AppointmentId,
+                        lbl.InvoiceLineId AS InvoiceLineId,
+                        lbl.LabelNumber   AS LabelNumber,
+                        lbl.ItemId        AS ItemId,
+                        lbl.ServiceName   AS ServiceName,
+                        lbl.ServiceNameAr AS ServiceNameAr,
+                        lbl.Price         AS Price,
+                        lbl.Barcode       AS Barcode,
+                        lbl.QrPayload     AS QrPayload,
+                        lbl.CreatedAt     AS CreatedAt,
+                        lbl.IsAssigned    AS IsAssigned,
+                        lbl.AssignedStaffId AS AssignedStaffId,
+                        st.EnglishName    AS AssignedStaffName
+                    FROM dbo.PosServiceLabels lbl
+                    LEFT JOIN dbo.STAFF st ON st.Id = lbl.AssignedStaffId
+                    WHERE lbl.InvoiceId = @InvoiceId
+                    ORDER BY lbl.LabelNumber, lbl.Id",
+                    new { InvoiceId = invoiceId })
+                    .Select(x => new PosDtos.PosLabelDto(
+                        LabelId: (int)x.LabelId,
+                        InvoiceId: (int)x.InvoiceId,
+                        AppointmentId: (int)x.AppointmentId,
+                        InvoiceLineId: (int?)x.InvoiceLineId,
+                        LabelNumber: (int)x.LabelNumber,
+                        ItemId: (int)x.ItemId,
+                        ServiceName: (string?)x.ServiceName ?? "",
+                        ServiceNameAr: (string?)x.ServiceNameAr ?? (string?)x.ServiceName ?? "",
+                        Price: (decimal)x.Price,
+                        Currency: currency,
+                        Barcode: (string?)x.Barcode ?? "",
+                        QrPayload: (string?)x.QrPayload ?? (string?)x.Barcode ?? "",
+                        CreatedAt: (DateTime)x.CreatedAt,
+                        IsAssigned: Convert.ToInt32(x.IsAssigned) == 1,
+                        AssignedStaffId: (int?)x.AssignedStaffId,
+                        AssignedStaffName: (string?)x.AssignedStaffName))
+                    .ToList();
+
                 var dto = new PosDtos.PosReceiptDto(
                     InvoiceId: (int)head.InvoiceId,
                     InvoiceNumber: (string?)head.InvoiceNumber ?? "",
@@ -932,7 +1052,8 @@ namespace PosDashboard.Web.Modules.System
                     Lines: lines,
                     Payments: payments,
                     Company: companyDto,
-                    InvoicePdfUrl: $"{Request.Scheme}://{Request.Host}/api/myfatoorah/invoice-pdf/{leadApptId}");
+                    InvoicePdfUrl: $"{Request.Scheme}://{Request.Host}/api/myfatoorah/invoice-pdf/{leadApptId}",
+                    Labels: labels);
 
                 return Ok(new PosDtos.ApiResult<PosDtos.PosReceiptDto>(true, null, dto));
             }
@@ -978,6 +1099,22 @@ namespace PosDashboard.Web.Modules.System
             var datePart = DateTime.UtcNow.ToString("yyyyMMdd");
             var randomPart = Guid.NewGuid().ToString("N").Substring(0, 5).ToUpperInvariant();
             return $"POS-{datePart}-{randomPart}";
+        }
+
+        /// <summary>Generates a unique 8-digit numeric barcode for a service label.</summary>
+        private static string GenerateUniqueBarcode(IDbConnection conn)
+        {
+            var rng = Random.Shared;
+            for (int attempt = 0; attempt < 30; attempt++)
+            {
+                string code = rng.Next(0, 100_000_000).ToString("D8");   // 00000000..99999999
+                int exists = SqlMapper.Query<int>(conn,
+                    "SELECT COUNT(1) FROM dbo.PosServiceLabels WHERE Barcode = @c",
+                    new { c = code }).FirstOrDefault();
+                if (exists == 0) return code;
+            }
+            // Extremely unlikely fallback — still 8 digits.
+            return (DateTime.UtcNow.Ticks % 100_000_000).ToString("D8");
         }
 
         private int ResolveCurrentUserId()
@@ -1154,7 +1291,7 @@ namespace PosDashboard.Web.Modules.System
                            ail.PackageGroupId AS PackageGroupId, ail.PackageOfferName AS PackageOfferName
                     FROM dbo.AppointmentInvoiceLines ail
                     INNER JOIN dbo.ITEM  i ON i.ITEM_ID = ail.ItemId
-                    INNER JOIN dbo.STAFF s ON s.Id      = ail.StaffId
+                    LEFT  JOIN dbo.STAFF s ON s.Id      = ail.StaffId
                     WHERE ail.InvoiceId = @InvoiceId AND ISNULL(ail.IsRefunded, 0) = 0
                     ORDER BY ail.Id",
                     new { InvoiceId = invoiceId }).ToList();
@@ -1164,7 +1301,7 @@ namespace PosDashboard.Web.Modules.System
                     pdfData.LineItems.Add(new InvoiceLineData
                     {
                         ItemName = (string)(ln.ItemEn ?? ln.ItemAr ?? "Service"),
-                        StaffName = (string)(ln.StaffEn ?? ln.StaffAr ?? ""),
+                        StaffName = (string)(ln.StaffEn ?? ln.StaffAr ?? "—"),
                         Quantity = 1,
                         UnitPrice = (decimal)ln.UnitPrice,
                         TotalPrice = (decimal)ln.TotalPrice,
@@ -1195,7 +1332,7 @@ namespace PosDashboard.Web.Modules.System
             public int Index { get; set; }
             public int ItemId { get; set; }
             public int UnitId { get; set; }
-            public int StaffId { get; set; }
+            public int? StaffId { get; set; }   // null = un-staffed (label generated)
             public string ItemEnName { get; set; } = "";
             public string ItemArName { get; set; } = "";
             public string StaffEnName { get; set; } = "";

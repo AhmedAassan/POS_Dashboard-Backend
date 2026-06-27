@@ -417,7 +417,7 @@ namespace PosDashboard.Web.Modules.System
                     FROM InvAmounts ia
                     INNER JOIN dbo.AppointmentData a ON a.Id = ia.AppointmentId
                     INNER JOIN dbo.CUSTOMER c        ON c.CUSTOMER_ID = a.CustomerId
-                    INNER JOIN dbo.STAFF s           ON s.Id = a.StaffId
+                    LEFT  JOIN dbo.STAFF s           ON s.Id = a.StaffId
                     LEFT JOIN dbo.AppointmentInvoices ai ON ai.AppointmentId = ia.AppointmentId
                     WHERE ia.NonDepositNonWalletPaid > 0
 
@@ -443,7 +443,7 @@ namespace PosDashboard.Web.Modules.System
                     FROM dbo.AppointmentPayments ap
                     INNER JOIN dbo.AppointmentData a ON a.Id = ap.AppointmentId
                     INNER JOIN dbo.CUSTOMER c        ON c.CUSTOMER_ID = a.CustomerId
-                    INNER JOIN dbo.STAFF s           ON s.Id = a.StaffId
+                    LEFT  JOIN dbo.STAFF s           ON s.Id = a.StaffId
                     INNER JOIN dbo.ITEM i            ON i.ITEM_ID = a.ItemId
                     LEFT  JOIN dbo.INVOICE_PAYMENT_TYPE pt ON pt.INVOICE_PAYMENT_TYPE_ID = ap.PaymentTypeId
                     WHERE a.BranchId = @BranchId
@@ -770,6 +770,7 @@ namespace PosDashboard.Web.Modules.System
                 ) pkgTotal
                 WHERE a.BranchId        = @BranchId
                   AND a.AppointmentDate  = @DateOnly
+                  AND a.StaffId IS NOT NULL          -- un-staffed POS sales have no staff to attribute to
                   AND (@StaffId IS NULL OR a.StaffId = @StaffId)
                   -- Exclude appointment if it has invoice lines and ALL of them are refunded
                   AND (
@@ -800,6 +801,7 @@ namespace PosDashboard.Web.Modules.System
                 WHERE a.BranchId        = @BranchId
                   AND a.AppointmentDate  = @DateOnly
                   AND ISNULL(aci.IsRefunded, 0) = 0
+                  AND aci.StaffId IS NOT NULL        -- skip un-staffed checkout items
                   AND (@StaffId IS NULL OR aci.StaffId = @StaffId)
 
                 UNION ALL
@@ -833,6 +835,7 @@ namespace PosDashboard.Web.Modules.System
                                 p).ToList();
 
                 var clientsByStaff = clientRows
+                    .Where(r => r.StaffId != null)          // defensive: never group a null staff id
                     .GroupBy(r => (int)r.StaffId)
                     .ToDictionary(
                         g => g.Key,
@@ -919,7 +922,9 @@ namespace PosDashboard.Web.Modules.System
                     p).ToList();
 
                 // Build full 0-23 hour grid (fills missing hours with 0)
-                var hourMap = hourlyRows.ToDictionary(r => (int)r.Hour, r => r);
+                var hourMap = hourlyRows
+                    .Where(r => r.Hour != null)            // skip rows with no start time (NULL hour)
+                    .ToDictionary(r => (int)r.Hour, r => r);
                 var hourly = new List<HourlyDistributionDto>();
                 for (int h = 0; h < 24; h++)
                 {
