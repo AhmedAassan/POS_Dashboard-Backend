@@ -185,7 +185,7 @@ namespace PosDashboard.Web.Modules.System
         [AllowAnonymous]
         public async Task<ActionResult<ApiResultBilingual<object>>> RequestOtp(
         [FromBody] RequestOtpDto? request,
-        [FromQuery] string? mobileNo = null)   
+        [FromQuery] string? mobileNo = null)
         {
             // Use body first, then query fallback
             var mobile = request?.MobileNo ?? mobileNo;
@@ -195,7 +195,7 @@ namespace PosDashboard.Web.Modules.System
                     false, "MobileNo is required", null,
                     "رقم الهاتف مطلوب", "MobileNo is required"));
 
-            
+
 
             using var conn = sqlConnections.NewByKey("Default");
 
@@ -988,7 +988,7 @@ namespace PosDashboard.Web.Modules.System
 
             double totalDuration = durations.Sum(d => (d == null || d <= 0) ? 30.0 : d.Value);
             if (totalDuration <= 0) totalDuration = 30;
-            
+
             // ── 3. Existing appointments on this day for this staff ───
             var existingApts = conn.Query<(TimeSpan Start, TimeSpan End)>(@"
                 SELECT
@@ -1704,7 +1704,7 @@ namespace PosDashboard.Web.Modules.System
         // ──────────────────────────────────────────────────────────────
         // PUT /api/online/profile
         // ──────────────────────────────────────────────────────────────
-        [HttpPut("profile")]
+        [HttpPost("profile/update")]
         [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)]
         public ActionResult<ApiResultBilingual<OnlineUserDto>> UpdateProfile(
             [FromBody] UpdateProfileDto request)
@@ -1924,7 +1924,7 @@ namespace PosDashboard.Web.Modules.System
         // ──────────────────────────────────────────────────────────────
         // PUT /api/online/addresses/{id}
         // ──────────────────────────────────────────────────────────────
-        [HttpPut("addresses/{id:int}")]
+        [HttpPost("addresses/update/{id:int}")]
         [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)]
         public ActionResult<ApiResultBilingual<OnlineAddressDto>> UpdateAddress(
             int id, [FromBody] UpsertAddressDto request)
@@ -1992,7 +1992,7 @@ namespace PosDashboard.Web.Modules.System
         // ──────────────────────────────────────────────────────────────
         // DELETE /api/online/addresses/{id}
         // ──────────────────────────────────────────────────────────────
-        [HttpDelete("addresses/{id:int}")]
+        [HttpPost("addresses/delete/{id:int}")]
         [Authorize(AuthenticationSchemes = JwtBearerDefaults.AuthenticationScheme)]
         public ActionResult<ApiResultBilingual<object>> DeleteAddress(int id)
         {

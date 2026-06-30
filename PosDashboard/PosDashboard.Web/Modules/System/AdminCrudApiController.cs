@@ -198,7 +198,7 @@ namespace PosDashboard.Web.Modules.System
         }
 
         /// <summary>DELETE /api/admin-crud/branches/{id} — soft delete (deactivate)</summary>
-        [HttpDelete("branches/{id:int}")]
+        [HttpPost("branches/delete/{id:int}")]
         public ActionResult<ApiResult<bool>> DeleteBranch(int id)
         {
             using var conn = sqlConnections.NewByKey("Default");
@@ -332,7 +332,7 @@ namespace PosDashboard.Web.Modules.System
             return GetAppointmentCategoryById(id);
         }
 
-        [HttpDelete("appointment-categories/{id:int}")]
+        [HttpPost("appointment-categories/delete/{id:int}")]
         public ActionResult<ApiResult<bool>> DeleteAppointmentCategory(int id)
         {
             using var conn = sqlConnections.NewByKey("Default");
@@ -540,7 +540,7 @@ namespace PosDashboard.Web.Modules.System
             return GetCategoryById(id);
         }
 
-        [HttpDelete("categories/{id:int}")]
+        [HttpPost("categories/delete/{id:int}")]
         public ActionResult<ApiResult<bool>> DeleteCategory(int id)
         {
             using var conn = sqlConnections.NewByKey("Default");
@@ -794,7 +794,7 @@ namespace PosDashboard.Web.Modules.System
                     MinPrice = unit.MinimumPrice,
                     Deposit = unit.Deposit,
                     Active = unit.Active ? 1 : 0,
-                    BranchId = unit.BranchId,
+                    BranchId = 1,
                     UserId = userId,
                     Now = DateTime.UtcNow
                 });
@@ -889,7 +889,7 @@ namespace PosDashboard.Web.Modules.System
                             MinPrice = unit.MinimumPrice,
                             Deposit = unit.Deposit,
                             Active = unit.Active ? 1 : 0,
-                            BranchId = unit.BranchId,
+                            BranchId = 1,
                             UserId = userId,
                             Now = DateTime.UtcNow,
                             UnitId2 = unit.ItemUnitId,
@@ -925,7 +925,7 @@ namespace PosDashboard.Web.Modules.System
                             MinPrice = unit.MinimumPrice,
                             Deposit = unit.Deposit,
                             Active = unit.Active ? 1 : 0,
-                            BranchId = unit.BranchId,
+                            BranchId = 1,
                             UserId = userId,
                             Now = DateTime.UtcNow
                         });
@@ -935,7 +935,7 @@ namespace PosDashboard.Web.Modules.System
             return Ok(new ApiResult<bool>(true, null, true));
         }
 
-        [HttpDelete("items/{id:int}")]
+        [HttpPost("items/delete/{id:int}")]
         public ActionResult<ApiResult<bool>> DeleteItem(int id)
         {
             using var conn = sqlConnections.NewByKey("Default");
@@ -982,7 +982,7 @@ namespace PosDashboard.Web.Modules.System
                 MinPrice = req.MinimumPrice,
                 Deposit = req.Deposit,
                 Active = req.Active ? 1 : 0,
-                BranchId = req.BranchId,
+                BranchId = 1,
                 UserId = userId,
                 Now = DateTime.UtcNow
             });
@@ -1032,7 +1032,7 @@ namespace PosDashboard.Web.Modules.System
                 MinPrice = req.MinimumPrice,
                 Deposit = req.Deposit,
                 Active = req.Active ? 1 : 0,
-                BranchId = req.BranchId,
+                BranchId = 1,
                 UserId = userId,
                 Now = DateTime.UtcNow
             });
@@ -1053,7 +1053,7 @@ namespace PosDashboard.Web.Modules.System
             return Ok(new ApiResult<ItemUnitSummaryDto>(true, null, result));
         }
 
-        [HttpDelete("items/{itemId:int}/units/{unitId:int}")]
+        [HttpPost("items/{itemId:int}/units/delete/{unitId:int}")]
         public ActionResult<ApiResult<bool>> DeleteItemUnit(int itemId, int unitId)
         {
             using var conn = sqlConnections.NewByKey("Default");
@@ -1255,7 +1255,7 @@ namespace PosDashboard.Web.Modules.System
             return GetStaffById(id);
         }
 
-        [HttpDelete("staff/{id:int}")]
+        [HttpPost("staff/delete/{id:int}")]
         public ActionResult<ApiResult<bool>> DeleteStaff(int id)
         {
             using var conn = sqlConnections.NewByKey("Default");
@@ -1330,7 +1330,7 @@ namespace PosDashboard.Web.Modules.System
             return Ok(new ApiResult<StaffItemDto>(true, null, result));
         }
 
-        [HttpDelete("staff/{staffId:int}/items/{itemId:int}")]
+        [HttpPost("staff/{staffId:int}/items/delete/{itemId:int}")]
         public ActionResult<ApiResult<bool>> DeleteStaffItem(int staffId, int itemId)
         {
             using var conn = sqlConnections.NewByKey("Default");
@@ -1511,7 +1511,7 @@ namespace PosDashboard.Web.Modules.System
         }
 
         /// <summary>DELETE = block customer (not physical delete)</summary>
-        [HttpDelete("customers/{id:int}")]
+        [HttpPost("customers/delete/{id:int}")]
         public ActionResult<ApiResult<bool>> BlockCustomer(int id)
         {
             using var conn = sqlConnections.NewByKey("Default");

@@ -396,7 +396,7 @@ namespace PosDashboard.Web.Modules.System
         // =============================================
         // PUT /api/staff-time-blocks/{id}
         // =============================================
-        [HttpPut("{id:int}")]
+        [HttpPost("update/{id:int}")]
         public ActionResult<ApiResult<TimeBlockDto>> Update(
             int id, [FromBody] UpdateTimeBlockRequest request)
         {
@@ -499,7 +499,7 @@ namespace PosDashboard.Web.Modules.System
         // =============================================
         // DELETE /api/staff-time-blocks/{id}
         // =============================================
-        [HttpDelete("{id:int}")]
+        [HttpPost("delete/{id:int}")]
         public ActionResult<ApiResult<object>> Delete(int id)
         {
             using var conn = sqlConnections.NewByKey("Default");

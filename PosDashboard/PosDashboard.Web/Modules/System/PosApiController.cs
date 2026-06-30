@@ -183,7 +183,8 @@ namespace PosDashboard.Web.Modules.System
                         s.EnglishName AS NameEn,
                         s.ArabicName  AS NameAr,
                         s.Mobile,
-                        s.Active
+                        s.Active,
+                        s.EmployeeCode AS EmployeeCode
                     FROM dbo.STAFF s
                     WHERE s.Deleted = 0
                       AND s.Active = 1
@@ -195,7 +196,8 @@ namespace PosDashboard.Web.Modules.System
                         NameEn: (string?)s.NameEn ?? (string?)s.NameAr ?? "",
                         NameAr: (string?)s.NameAr ?? (string?)s.NameEn ?? "",
                         Mobile: (string?)s.Mobile,
-                        Active: (bool)s.Active))
+                        Active: (bool)s.Active,
+                        EmployeeCode: (s.EmployeeCode == null || s.EmployeeCode is DBNull) ? null : (string?)Convert.ToString(s.EmployeeCode)))
                     .ToList();
 
                 // -------- Payment types --------
@@ -1065,8 +1067,243 @@ namespace PosDashboard.Web.Modules.System
         }
 
         // =====================================================================
+        // PHASE 2 — assign a staff member to printed service labels
+        //   GET  /api/pos/labels/lookup?barcode=      → find one label (scan / manual)
+        //   GET  /api/pos/labels/unassigned?branchId= → list labels awaiting a staff
+        //   POST /api/pos/labels/assign               → assign staff to label(s)
+        //   POST /api/pos/labels/{id}/reprint         → bump print count
+        // =====================================================================
+
+        /// <summary>Find a single label by its barcode/QR value (8 digits). Used by scan + manual entry.</summary>
+        [HttpGet("labels/lookup")]
+        public ActionResult<PosDtos.ApiResult<PosDtos.PosLabelDto>> LookupLabel([FromQuery] string barcode)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(barcode))
+                    return Ok(new PosDtos.ApiResult<PosDtos.PosLabelDto>(false, "Barcode is required", null));
+
+                using var conn = sqlConnections.NewByKey("Default");
+                if (conn.State != ConnectionState.Open) conn.Open();
+
+                var label = QueryLabels(conn, "l.Barcode = @Barcode", new { Barcode = barcode.Trim() }).FirstOrDefault();
+                if (label == null)
+                    return Ok(new PosDtos.ApiResult<PosDtos.PosLabelDto>(false, "No label matches this code", null));
+
+                return Ok(new PosDtos.ApiResult<PosDtos.PosLabelDto>(true, null, label));
+            }
+            catch (Exception ex)
+            {
+                return Ok(new PosDtos.ApiResult<PosDtos.PosLabelDto>(false, $"Lookup failed: {ex.Message}", null));
+            }
+        }
+
+        /// <summary>List labels still awaiting staff assignment (optionally filtered by branch + free text).</summary>
+        [HttpGet("labels/unassigned")]
+        public ActionResult<PosDtos.ApiResult<List<PosDtos.PosLabelDto>>> UnassignedLabels(
+            [FromQuery] int? branchId, [FromQuery] string? search, [FromQuery] int? take)
+        {
+            try
+            {
+                using var conn = sqlConnections.NewByKey("Default");
+                if (conn.State != ConnectionState.Open) conn.Open();
+
+                var where = new StringBuilder("ISNULL(l.IsAssigned, 0) = 0");
+                if (branchId.HasValue && branchId.Value > 0) where.Append(" AND l.BranchId = @BranchId");
+                if (!string.IsNullOrWhiteSpace(search))
+                    where.Append(" AND (l.Barcode LIKE @Like OR l.ServiceName LIKE @Like OR l.ServiceNameAr LIKE @Like)");
+
+                int top = take.HasValue && take.Value > 0 && take.Value <= 500 ? take.Value : 200;
+
+                var labels = QueryLabels(conn, where.ToString(), new
+                {
+                    BranchId = branchId ?? 0,
+                    Like = "%" + (search ?? "").Trim() + "%"
+                }, top);
+
+                return Ok(new PosDtos.ApiResult<List<PosDtos.PosLabelDto>>(true, null, labels));
+            }
+            catch (Exception ex)
+            {
+                return Ok(new PosDtos.ApiResult<List<PosDtos.PosLabelDto>>(false, $"Failed to load labels: {ex.Message}", null));
+            }
+        }
+
+        /// <summary>
+        /// Assign a staff member to one or more labels — each label can go to a DIFFERENT staff.
+        /// For each pair this writes the staff onto the underlying service row
+        /// (AppointmentData + AppointmentInvoiceLines) and marks the label assigned.
+        /// Already-assigned / unknown labels (or unknown staff) are skipped, not an error.
+        /// </summary>
+        [HttpPost("labels/assign")]
+        public ActionResult<PosDtos.ApiResult<PosDtos.PosAssignLabelsResponse>> AssignLabels(
+            [FromBody] PosDtos.PosAssignLabelsRequest request)
+        {
+            try
+            {
+                if (request == null || request.Assignments == null || request.Assignments.Count == 0)
+                    return Ok(new PosDtos.ApiResult<PosDtos.PosAssignLabelsResponse>(false, "No labels selected", null));
+
+                using var conn = sqlConnections.NewByKey("Default");
+                if (conn.State != ConnectionState.Open) conn.Open();
+
+                // de-dup by label (last write wins) and keep only valid pairs
+                var pairs = request.Assignments
+                    .Where(a => a != null && a.LabelId > 0 && a.StaffId > 0)
+                    .GroupBy(a => a.LabelId)
+                    .ToDictionary(g => g.Key, g => g.Last().StaffId);
+
+                if (pairs.Count == 0)
+                    return Ok(new PosDtos.ApiResult<PosDtos.PosAssignLabelsResponse>(false, "A staff member is required for each label", null));
+
+                // valid staff ids (active, not deleted)
+                var staffIds = pairs.Values.Distinct().ToList();
+                var validStaff = SqlMapper.Query(conn,
+                    "SELECT Id FROM dbo.STAFF WHERE Deleted = 0 AND Id IN @Ids",
+                    new { Ids = staffIds })
+                    .Select(r => (int)r.Id).ToHashSet();
+
+                int userId = ResolveCurrentUserId();
+                int assigned = 0, skipped = 0;
+
+                using (var uow = new UnitOfWork(conn))
+                {
+                    foreach (var kv in pairs)
+                    {
+                        int labelId = kv.Key, staffId = kv.Value;
+                        if (!validStaff.Contains(staffId)) { skipped++; continue; }
+
+                        var lbl = SqlMapper.Query(uow.Connection, @"
+                            SELECT Id, AppointmentId, InvoiceLineId, ISNULL(IsAssigned,0) AS IsAssigned
+                            FROM dbo.PosServiceLabels WHERE Id = @Id",
+                            new { Id = labelId }).FirstOrDefault();
+
+                        if (lbl == null || Convert.ToBoolean(lbl.IsAssigned)) { skipped++; continue; }
+
+                        // 1) the appointment row that represents this service line
+                        SqlMapper.Execute(uow.Connection,
+                            "UPDATE dbo.AppointmentData SET StaffId = @StaffId WHERE Id = @AppointmentId",
+                            new { StaffId = staffId, AppointmentId = (int)lbl.AppointmentId });
+
+                        // 2) the matching invoice line (when known)
+                        if (lbl.InvoiceLineId != null && !(lbl.InvoiceLineId is DBNull))
+                        {
+                            SqlMapper.Execute(uow.Connection,
+                                "UPDATE dbo.AppointmentInvoiceLines SET StaffId = @StaffId WHERE Id = @LineId",
+                                new { StaffId = staffId, LineId = (int)lbl.InvoiceLineId });
+                        }
+
+                        // 3) mark the label assigned
+                        SqlMapper.Execute(uow.Connection, @"
+                            UPDATE dbo.PosServiceLabels
+                            SET IsAssigned = 1, AssignedStaffId = @StaffId,
+                                AssignedAt = SYSUTCDATETIME(), AssignedBy = @UserId
+                            WHERE Id = @Id",
+                            new { StaffId = staffId, UserId = userId, Id = labelId });
+
+                        assigned++;
+                    }
+
+                    uow.Commit();
+                }
+
+                var ids = pairs.Keys.ToList();
+                var resulting = ids.Count > 0
+                    ? QueryLabels(conn, "l.Id IN @Ids", new { Ids = ids })
+                    : new List<PosDtos.PosLabelDto>();
+
+                return Ok(new PosDtos.ApiResult<PosDtos.PosAssignLabelsResponse>(
+                    true, null,
+                    new PosDtos.PosAssignLabelsResponse(assigned, skipped, resulting)));
+            }
+            catch (Exception ex)
+            {
+                return Ok(new PosDtos.ApiResult<PosDtos.PosAssignLabelsResponse>(
+                    false, $"Assignment failed: {ex.Message}", null));
+            }
+        }
+
+        /// <summary>Bump the print counter for a label (reprint bookkeeping). Returns the label.</summary>
+        [HttpPost("labels/{id:int}/reprint")]
+        public ActionResult<PosDtos.ApiResult<PosDtos.PosLabelDto>> ReprintLabel(int id)
+        {
+            try
+            {
+                using var conn = sqlConnections.NewByKey("Default");
+                if (conn.State != ConnectionState.Open) conn.Open();
+
+                using (var uow = new UnitOfWork(conn))
+                {
+                    SqlMapper.Execute(uow.Connection,
+                        "UPDATE dbo.PosServiceLabels SET PrintCount = ISNULL(PrintCount,0) + 1 WHERE Id = @Id",
+                        new { Id = id });
+                    uow.Commit();
+                }
+
+                var label = QueryLabels(conn, "l.Id = @Id", new { Id = id }).FirstOrDefault();
+                if (label == null)
+                    return Ok(new PosDtos.ApiResult<PosDtos.PosLabelDto>(false, "Label not found", null));
+
+                return Ok(new PosDtos.ApiResult<PosDtos.PosLabelDto>(true, null, label));
+            }
+            catch (Exception ex)
+            {
+                return Ok(new PosDtos.ApiResult<PosDtos.PosLabelDto>(false, $"Reprint failed: {ex.Message}", null));
+            }
+        }
+
+        // =====================================================================
         // Private helpers
         // =====================================================================
+
+        /// <summary>Reads service labels with the assigned-staff name + invoice currency joined.</summary>
+        private List<PosDtos.PosLabelDto> QueryLabels(IDbConnection conn, string where, object param, int? top = null)
+        {
+            string topClause = top.HasValue ? $"TOP ({top.Value}) " : "";
+            string sql = $@"
+                SELECT {topClause}
+                    l.Id            AS LabelId,
+                    l.InvoiceId     AS InvoiceId,
+                    l.AppointmentId AS AppointmentId,
+                    l.InvoiceLineId AS InvoiceLineId,
+                    l.LabelNumber   AS LabelNumber,
+                    l.ItemId        AS ItemId,
+                    l.ServiceName   AS ServiceName,
+                    l.ServiceNameAr AS ServiceNameAr,
+                    l.Price         AS Price,
+                    ISNULL(inv.Currency, 'KWD') AS Currency,
+                    l.Barcode       AS Barcode,
+                    l.QrPayload     AS QrPayload,
+                    l.CreatedAt     AS CreatedAt,
+                    ISNULL(l.IsAssigned, 0) AS IsAssigned,
+                    l.AssignedStaffId       AS AssignedStaffId,
+                    s.EnglishName           AS AssignedStaffName
+                FROM dbo.PosServiceLabels l
+                LEFT JOIN dbo.AppointmentInvoices inv ON inv.Id = l.InvoiceId
+                LEFT JOIN dbo.STAFF s ON s.Id = l.AssignedStaffId
+                WHERE {where}
+                ORDER BY l.CreatedAt DESC, l.LabelNumber";
+
+            return SqlMapper.Query(conn, sql, param)
+                .Select(l => new PosDtos.PosLabelDto(
+                    LabelId: (int)l.LabelId,
+                    InvoiceId: (int)l.InvoiceId,
+                    AppointmentId: (int)l.AppointmentId,
+                    InvoiceLineId: (l.InvoiceLineId == null || l.InvoiceLineId is DBNull) ? (int?)null : (int)l.InvoiceLineId,
+                    LabelNumber: (int)l.LabelNumber,
+                    ItemId: (int)l.ItemId,
+                    ServiceName: (string)(l.ServiceName ?? ""),
+                    ServiceNameAr: (string)(l.ServiceNameAr ?? ""),
+                    Price: (decimal)l.Price,
+                    Currency: (string)(l.Currency ?? "KWD"),
+                    Barcode: (string)(l.Barcode ?? ""),
+                    QrPayload: (string)(l.QrPayload ?? (l.Barcode ?? "")),
+                    CreatedAt: (DateTime)l.CreatedAt,
+                    IsAssigned: Convert.ToBoolean(l.IsAssigned),
+                    AssignedStaffId: (l.AssignedStaffId == null || l.AssignedStaffId is DBNull) ? (int?)null : (int)l.AssignedStaffId,
+                    AssignedStaffName: (l.AssignedStaffName == null || l.AssignedStaffName is DBNull) ? null : (string?)l.AssignedStaffName))
+                .ToList();
+        }
 
         private ActionResult<PosDtos.ApiResult<PosDtos.PosCheckoutResponse>> FailCheckout(string error) =>
             Ok(new PosDtos.ApiResult<PosDtos.PosCheckoutResponse>(false, error, null));

@@ -25,11 +25,14 @@ namespace PosDashboard.Web.Modules.System
             this.sqlConnections = sqlConnections;
         }
 
-        // GET /api/dashboard/summary?branchId=1&date=2026-05-01&staffId=
+        // GET /api/dashboard/summary?branchId=1&fromDate=2026-05-01&toDate=2026-05-07&staffId=
+        // Backward compatible: ?date=2026-05-01 still works (treated as a single-day range).
         [HttpGet("summary")]
         public ActionResult<ApiResult<DashboardSummaryDto>> Summary(
             [FromQuery] int branchId,
-            [FromQuery] string date,
+            [FromQuery] string? fromDate = null,
+            [FromQuery] string? toDate = null,
+            [FromQuery] string? date = null,
             [FromQuery] int? staffId = null,
             [FromQuery] string? lang = null)
         {
@@ -41,10 +44,32 @@ namespace PosDashboard.Web.Modules.System
                 if (branchId <= 0)
                     return Ok(new ApiResult<DashboardSummaryDto>(false, "branchId is required", null));
 
-                if (!DateTime.TryParseExact(date, "yyyy-MM-dd",
-                    CultureInfo.InvariantCulture, DateTimeStyles.None, out var dateOnly))
+                // Resolve the requested period. Priority:
+                //   1) fromDate/toDate (range mode)
+                //   2) legacy single 'date' (single-day range)
+                // If only one of fromDate/toDate is supplied, the other falls back to it.
+                var rawFrom = !string.IsNullOrWhiteSpace(fromDate) ? fromDate
+                            : (!string.IsNullOrWhiteSpace(date) ? date : toDate);
+                var rawTo = !string.IsNullOrWhiteSpace(toDate) ? toDate
+                            : (!string.IsNullOrWhiteSpace(date) ? date : fromDate);
+
+                if (string.IsNullOrWhiteSpace(rawFrom) || string.IsNullOrWhiteSpace(rawTo))
                     return Ok(new ApiResult<DashboardSummaryDto>(false,
-                        "date must be yyyy-MM-dd", null));
+                        "fromDate and toDate (or legacy date) are required", null));
+
+                if (!DateTime.TryParseExact(rawFrom, "yyyy-MM-dd",
+                    CultureInfo.InvariantCulture, DateTimeStyles.None, out var fromDateOnly))
+                    return Ok(new ApiResult<DashboardSummaryDto>(false,
+                        "fromDate must be yyyy-MM-dd", null));
+
+                if (!DateTime.TryParseExact(rawTo, "yyyy-MM-dd",
+                    CultureInfo.InvariantCulture, DateTimeStyles.None, out var toDateOnly))
+                    return Ok(new ApiResult<DashboardSummaryDto>(false,
+                        "toDate must be yyyy-MM-dd", null));
+
+                // Tolerate a reversed range (user picked end before start).
+                if (toDateOnly < fromDateOnly)
+                    (fromDateOnly, toDateOnly) = (toDateOnly, fromDateOnly);
 
                 using var conn = sqlConnections.NewByKey("Default");
 
@@ -70,15 +95,20 @@ namespace PosDashboard.Web.Modules.System
                 int tzOffset = meta?.TzOffset != null ? (int)meta.TzOffset : 3;
 
 
-                var dateStart = dateOnly.Date.AddHours(-tzOffset);
-                var dateEnd = dateStart.AddDays(1);
+                // Range window (half-open in UTC-stored terms, offset-adjusted):
+                //   start = local-midnight of fromDate  - tzOffset
+                //   end   = local-midnight of (toDate+1) - tzOffset  (exclusive)
+                var dateStart = fromDateOnly.Date.AddHours(-tzOffset);
+                var dateEnd = toDateOnly.Date.AddDays(1).AddHours(-tzOffset);
 
                 var p = new
                 {
                     BranchId = branchId,
                     DateStart = dateStart,
                     DateEnd = dateEnd,
-                    DateOnly = dateOnly.Date,   // ← Must prefer local date (without offset)
+                    // DATE-typed comparisons use the local dates (without offset), inclusive on both ends.
+                    FromDateOnly = fromDateOnly.Date,
+                    ToDateOnly = toDateOnly.Date,
                     StaffId = staffId,
                     Lang = langCode
                 };
@@ -213,7 +243,7 @@ namespace PosDashboard.Web.Modules.System
                                             SUM(CASE WHEN RefundType = 'WALLET' THEN 1 ELSE 0 END) AS WalletRefunds
                                      FROM dbo.RefundTransactions
                                      WHERE BranchId = @BranchId
-                                       AND CAST(ProcessedAt AS DATE) = @DateOnly
+                                       AND CAST(ProcessedAt AS DATE) BETWEEN @FromDateOnly AND @ToDateOnly
                                        AND Deleted = 0",
                     p).FirstOrDefault();
 
@@ -695,7 +725,7 @@ namespace PosDashboard.Web.Modules.System
 
                 ) a ON a.StaffId = s.Id
                    AND a.BranchId = @BranchId
-                   AND a.AppointmentDate = @DateOnly
+                   AND a.AppointmentDate BETWEEN @FromDateOnly AND @ToDateOnly
                 WHERE s.Deleted = 0
                   AND s.Active = 1
                   AND (s.BranchId IS NULL OR s.BranchId = @BranchId)
@@ -769,7 +799,7 @@ namespace PosDashboard.Web.Modules.System
                     )
                 ) pkgTotal
                 WHERE a.BranchId        = @BranchId
-                  AND a.AppointmentDate  = @DateOnly
+                  AND a.AppointmentDate  BETWEEN @FromDateOnly AND @ToDateOnly
                   AND a.StaffId IS NOT NULL          -- un-staffed POS sales have no staff to attribute to
                   AND (@StaffId IS NULL OR a.StaffId = @StaffId)
                   -- Exclude appointment if it has invoice lines and ALL of them are refunded
@@ -799,7 +829,7 @@ namespace PosDashboard.Web.Modules.System
                 INNER JOIN dbo.CUSTOMER        c ON c.CUSTOMER_ID = aci.CustomerId
                 INNER JOIN dbo.ITEM            i ON i.ITEM_ID     = aci.ItemId
                 WHERE a.BranchId        = @BranchId
-                  AND a.AppointmentDate  = @DateOnly
+                  AND a.AppointmentDate  BETWEEN @FromDateOnly AND @ToDateOnly
                   AND ISNULL(aci.IsRefunded, 0) = 0
                   AND aci.StaffId IS NOT NULL        -- skip un-staffed checkout items
                   AND (@StaffId IS NULL OR aci.StaffId = @StaffId)
@@ -828,7 +858,7 @@ namespace PosDashboard.Web.Modules.System
                   AND cps.AppointmentId IS NULL
                   AND ISNULL(cps.Deleted, 0) = 0
                   AND c.BRANCH_ID             = @BranchId
-                  AND CAST(cps.ServedDate AS DATE) = @DateOnly
+                  AND CAST(cps.ServedDate AS DATE) BETWEEN @FromDateOnly AND @ToDateOnly
                   AND (@StaffId IS NULL OR cps.StaffId = @StaffId)
 
                 ORDER BY StaffId, [Time];",
@@ -847,12 +877,17 @@ namespace PosDashboard.Web.Modules.System
                         )).ToList()
                     );
 
+                // Utilization is measured against the total available working minutes
+                // across the whole selected period (workday * number of days).
+                int numDays = Math.Max(1, (int)(toDateOnly.Date - fromDateOnly.Date).TotalDays + 1);
+                int periodWorkMinutes = workdayMinutes * numDays;
+
                 var staffPerformance = staffRows.Select(r =>
                 {
                     int sId = (int)r.StaffId;
                     int totalWork = (int)r.TotalWorkMinutes;
-                    decimal util = workdayMinutes > 0
-                        ? Math.Round((decimal)totalWork * 100m / workdayMinutes, 1)
+                    decimal util = periodWorkMinutes > 0
+                        ? Math.Round((decimal)totalWork * 100m / periodWorkMinutes, 1)
                         : 0m;
                     if (util > 100m) util = 100m;
 
@@ -890,7 +925,7 @@ namespace PosDashboard.Web.Modules.System
                     SUM(CASE WHEN ServiceType = 'HOME'  THEN 1 ELSE 0 END) AS HomeCount
                 FROM dbo.AppointmentData
                 WHERE BranchId = @BranchId
-                  AND AppointmentDate = @DateOnly
+                  AND AppointmentDate BETWEEN @FromDateOnly AND @ToDateOnly
                   AND (@StaffId IS NULL OR StaffId = @StaffId);",
                     p).FirstOrDefault();
 
@@ -903,7 +938,7 @@ namespace PosDashboard.Web.Modules.System
                     FROM dbo.AppointmentData a
                     INNER JOIN dbo.ITEM i ON i.ITEM_ID = a.ItemId
                     WHERE a.BranchId = @BranchId
-                      AND a.AppointmentDate = @DateOnly
+                      AND a.AppointmentDate BETWEEN @FromDateOnly AND @ToDateOnly
                       AND (@StaffId IS NULL OR a.StaffId = @StaffId)
                     GROUP BY DATEPART(HOUR, a.StartTime), i.ITEM_NAME1, i.ITEM_NAME2
                 ),
@@ -966,7 +1001,7 @@ namespace PosDashboard.Web.Modules.System
                 INNER JOIN dbo.ITEM                  i   ON i.ITEM_ID = a.ItemId
                 INNER JOIN dbo.AppointmentCategories ac  ON ac.Id = i.AppointmentCategoryId
                 WHERE a.BranchId = @BranchId
-                  AND a.AppointmentDate = @DateOnly
+                  AND a.AppointmentDate BETWEEN @FromDateOnly AND @ToDateOnly
                   AND (@StaffId IS NULL OR a.StaffId = @StaffId)
                   AND ISNULL(ac.Deleted, 0) = 0
                 GROUP BY ac.EnglishName, ac.ArabicName
@@ -984,7 +1019,7 @@ namespace PosDashboard.Web.Modules.System
                     SELECT DISTINCT a.CustomerId
                     FROM dbo.AppointmentData a
                     WHERE a.BranchId = @BranchId
-                      AND a.AppointmentDate = @DateOnly
+                      AND a.AppointmentDate BETWEEN @FromDateOnly AND @ToDateOnly
                 )
                 SELECT
                     (SELECT COUNT(*) FROM dbo.CUSTOMER c
@@ -1010,7 +1045,7 @@ namespace PosDashboard.Web.Modules.System
                     FROM dbo.AppointmentData a
                     INNER JOIN dbo.AppointmentInvoices inv ON inv.AppointmentId = a.Id
                     WHERE a.BranchId = @BranchId
-                      AND a.AppointmentDate = @DateOnly
+                      AND a.AppointmentDate BETWEEN @FromDateOnly AND @ToDateOnly
 
                     UNION
 
@@ -1020,7 +1055,7 @@ namespace PosDashboard.Web.Modules.System
                     INNER JOIN dbo.AppointmentInvoiceLines ail ON ail.AppointmentId = a.Id
                     INNER JOIN dbo.AppointmentInvoices inv ON inv.Id = ail.InvoiceId
                     WHERE a.BranchId = @BranchId
-                      AND a.AppointmentDate = @DateOnly
+                      AND a.AppointmentDate BETWEEN @FromDateOnly AND @ToDateOnly
                 )
                 SELECT TOP 5
                     c.CUSTOMER_NAME            AS CustomerName,

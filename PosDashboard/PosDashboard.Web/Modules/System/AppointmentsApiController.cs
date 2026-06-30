@@ -1079,7 +1079,7 @@ namespace PosDashboard.Web.Modules.System
         // =============================================
         // DELETE /api/appointments/{id}
         // =============================================
-        [HttpDelete("{id:int}")]
+        [HttpPost("delete/{id:int}")]
         public ActionResult<ApiResult<object>> Delete(int id)
         {
             using var conn = sqlConnections.NewByKey("Default");
@@ -2263,7 +2263,7 @@ namespace PosDashboard.Web.Modules.System
         // =============================================
         // DELETE /api/appointments/{id}/checkout-items/{itemId}
         // =============================================
-        [HttpDelete("{id:int}/checkout-items/{itemId:int}")]
+        [HttpPost("{id:int}/checkout-items/delete/{itemId:int}")]
         public ActionResult<ApiResult<CheckoutSummaryDto>> RemoveCheckoutItem(int id, int itemId)
         {
             using var conn = sqlConnections.NewByKey("Default");

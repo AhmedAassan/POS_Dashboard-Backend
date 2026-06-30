@@ -298,13 +298,13 @@ namespace PosDashboard.Web.Modules.System
                 WHERE CUSTOMER_ID = @CustomerId",
                 new { CustomerId = (int)apt.CustomerId }).FirstOrDefault();
 
-                        if (customer == null)
-                        {
-                            return Ok(new ApiResult<HomeServiceDto>(
-                                false,
-                                "Appointment customer not found",
-                                null));
-                        }
+            if (customer == null)
+            {
+                return Ok(new ApiResult<HomeServiceDto>(
+                    false,
+                    "Appointment customer not found",
+                    null));
+            }
 
             Guid appointmentCustomerRef = (Guid)customer.RefGuide;
 
@@ -427,7 +427,7 @@ namespace PosDashboard.Web.Modules.System
         // DELETE /api/home-service/appointment/{appointmentId}
         // Called when switching service type HOME -> SALON
         // ─────────────────────────────────────────────────────────────────
-        [HttpDelete("appointment/{appointmentId:int}")]
+        [HttpPost("appointment/delete/{appointmentId:int}")]
         public ActionResult<ApiResult<object>> DeleteForAppointment(int appointmentId)
         {
             using var conn = sqlConnections.NewByKey("Default");

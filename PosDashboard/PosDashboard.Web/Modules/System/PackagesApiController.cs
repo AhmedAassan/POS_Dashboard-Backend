@@ -224,7 +224,7 @@ namespace PosDashboard.Web.Modules.System
         // =============================================
         // PUT /api/packages/{id}
         // =============================================
-        [HttpPut("{id:int}")]
+        [HttpPost("update/{id:int}")]
         public ActionResult<ApiResult<PackageMasterDto>> UpdatePackage(
             int id, [FromBody] UpdatePackageRequest request)
         {
@@ -327,7 +327,7 @@ namespace PosDashboard.Web.Modules.System
         // =============================================
         // DELETE /api/packages/{id}
         // =============================================
-        [HttpDelete("{id:int}")]
+        [HttpPost("delete/{id:int}")]
         public ActionResult<ApiResult<object>> DeletePackage(int id)
         {
             using var conn = sqlConnections.NewByKey("Default");
@@ -866,7 +866,7 @@ namespace PosDashboard.Web.Modules.System
         }
 
         #region Private Helpers
-        
+
         private List<PackageItemDefDto> LoadPackageItems(IDbConnection conn, int packageId)
         {
             return conn.Query<dynamic>(@"

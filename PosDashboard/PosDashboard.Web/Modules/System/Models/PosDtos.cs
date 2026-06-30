@@ -68,7 +68,8 @@ namespace PosDashboard.Web.Modules.System.Models
             string NameEn,
             string NameAr,
             string? Mobile,
-            bool Active
+            bool Active,
+            string? EmployeeCode
         );
 
         public record PosPaymentTypeDto(
@@ -189,6 +190,23 @@ namespace PosDashboard.Web.Modules.System.Models
             bool IsAssigned,
             int? AssignedStaffId,
             string? AssignedStaffName
+        );
+
+        // ---- Phase 2: assign a staff member to one or more service labels ----
+        // Each item pairs a label with the staff it should go to (per-label staff).
+        public record PosAssignLabelItem(
+            int LabelId,
+            int StaffId
+        );
+
+        public record PosAssignLabelsRequest(
+            List<PosAssignLabelItem> Assignments
+        );
+
+        public record PosAssignLabelsResponse(
+            int AssignedCount,
+            int SkippedCount,            // labels that were already assigned / not found
+            List<PosLabelDto> Labels     // the resulting (now assigned) labels
         );
 
         public record PosCheckoutResponse(
