@@ -939,9 +939,55 @@ namespace PosDashboard.Web.Modules.System
         public ActionResult<ApiResult<bool>> DeleteItem(int id)
         {
             using var conn = sqlConnections.NewByKey("Default");
+            if (conn.State != ConnectionState.Open) conn.Open();
+
             var exists = conn.Query<int?>("SELECT ITEM_ID FROM dbo.ITEM WHERE ITEM_ID = @Id", new { Id = id }).FirstOrDefault();
             if (exists == null) return Ok(new ApiResult<bool>(false, "Item not found", false));
-            conn.Execute("UPDATE dbo.ITEM SET ITEM_IS_ACTIVE = 0 WHERE ITEM_ID = @Id", new { Id = id });
+
+            // If this item (or any of its units) is referenced by real records —
+            // appointments, checkout items, invoice lines, refunds, printed service
+            // labels, or packages already sold to customers — we must NOT hard-delete it
+            // (that would corrupt invoices, refunds and reports). Instead we deactivate it
+            // (soft delete) so the history stays intact.
+            var usageCount = conn.Query<int>(@"
+                SELECT
+                    (SELECT COUNT(1) FROM dbo.AppointmentData          WHERE ItemId = @Id)
+                  + (SELECT COUNT(1) FROM dbo.AppointmentCheckoutItems  WHERE ItemId = @Id)
+                  + (SELECT COUNT(1) FROM dbo.AppointmentInvoiceLines    WHERE ItemId = @Id)
+                  + (SELECT COUNT(1) FROM dbo.RefundTransactionLines     WHERE ItemId = @Id)
+                  + (SELECT COUNT(1) FROM dbo.PosServiceLabels           WHERE ItemId = @Id)
+                  + (SELECT COUNT(1)
+                       FROM dbo.CustomerPackageSessions cps
+                       INNER JOIN dbo.PackageItems pi ON pi.Id           = cps.PackageItemId
+                       INNER JOIN dbo.ITEM_UNIT   iu ON iu.ITEM_UNIT_ID = pi.ItemUnitId
+                      WHERE iu.ITEM_ID = @Id)",
+                new { Id = id }).FirstOrDefault();
+
+            if (usageCount > 0)
+            {
+                // Referenced elsewhere → soft delete (deactivate), keep the row for history.
+                conn.Execute("UPDATE dbo.ITEM SET ITEM_IS_ACTIVE = 0 WHERE ITEM_ID = @Id", new { Id = id });
+                return Ok(new ApiResult<bool>(true, null, true));
+            }
+
+            // Clean item (never used in any transaction) → permanent delete.
+            // Remove config/junction rows first (staff↔service map and package composition
+            // for unsold packages), then the units, then the item itself.
+            using var uow = new UnitOfWork(conn);
+
+            uow.Connection.Execute(
+                "DELETE FROM dbo.StaffItems  WHERE ItemUnitId IN (SELECT ITEM_UNIT_ID FROM dbo.ITEM_UNIT WHERE ITEM_ID = @Id)",
+                new { Id = id });
+
+            uow.Connection.Execute(
+                "DELETE FROM dbo.PackageItems WHERE ItemUnitId IN (SELECT ITEM_UNIT_ID FROM dbo.ITEM_UNIT WHERE ITEM_ID = @Id)",
+                new { Id = id });
+
+            uow.Connection.Execute("DELETE FROM dbo.ITEM_UNIT WHERE ITEM_ID = @Id", new { Id = id });
+            uow.Connection.Execute("DELETE FROM dbo.ITEM      WHERE ITEM_ID = @Id", new { Id = id });
+
+            uow.Commit();
+
             return Ok(new ApiResult<bool>(true, null, true));
         }
 
