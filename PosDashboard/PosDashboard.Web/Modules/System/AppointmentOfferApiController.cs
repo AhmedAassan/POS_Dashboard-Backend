@@ -35,6 +35,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Serenity.Data;
+using PosDashboard.Web.Modules.System.Services;
 using System;
 using System.Collections.Generic;
 using System.Data;
@@ -398,7 +399,7 @@ namespace PosDashboard.Web.Modules.System
                     }
 
                     int leadApptId = apptIds[0];
-                    string invoiceNumber = GenerateInvoiceNumber();
+                    string invoiceNumber = InvoiceNumberService.Next(uow.Connection, InvoiceNumberService.PrefixInvoice);
 
                     // 2) Shared invoice (carries the package total + offer metadata).
                     //    PaymentTypeId is null when no deposit was taken.
@@ -628,12 +629,7 @@ namespace PosDashboard.Web.Modules.System
             return Math.Max(slotMinutes, 5);
         }
 
-        private static string GenerateInvoiceNumber()
-        {
-            var datePart = DateTime.UtcNow.ToString("yyyyMMdd");
-            var randomPart = Guid.NewGuid().ToString("N").Substring(0, 5).ToUpperInvariant();
-            return $"INV-{datePart}-{randomPart}";
-        }
+
 
         private static AppointmentDtoModel? GetAppointmentById(IDbConnection conn, int id)
         {

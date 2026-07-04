@@ -449,7 +449,7 @@ namespace PosDashboard.Web.Modules.System
                     }
 
                     int leadApptId = apptIds[0];
-                    string invoiceNumber = GenerateInvoiceNumber();
+                    string invoiceNumber = InvoiceNumberService.Next(uow.Connection, InvoiceNumberService.PrefixInvoice);
 
                     int? invoicePaymentTypeId =
                         (int?)splits.FirstOrDefault()?.PaymentTypeId ?? walletPtId;
@@ -773,12 +773,7 @@ namespace PosDashboard.Web.Modules.System
             return Math.Round((master - sale) / master * 100m, 2);
         }
 
-        private static string GenerateInvoiceNumber()
-        {
-            var datePart = DateTime.UtcNow.ToString("yyyyMMdd");
-            var randomPart = Guid.NewGuid().ToString("N").Substring(0, 5).ToUpperInvariant();
-            return $"INV-{datePart}-{randomPart}";
-        }
+
 
         private int ResolveCurrentUserId()
         {

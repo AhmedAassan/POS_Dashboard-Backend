@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Serenity.Data;
+using PosDashboard.Web.Modules.System.Services;
 using System;
 using System.Collections.Generic;
 using System.Data;
@@ -415,6 +416,7 @@ namespace PosDashboard.Web.Modules.System
                         ), 0) AS PaidAmount,
                         CAST(ISNULL(cp.IsPaid, 0) AS bit) AS IsPaid,
                         ISNULL(cp.isOnline, 0) AS IsOnline,
+                        cp.InvoiceNumber,
                         cp.AddedDate,
                         cp.ExpiryDate,
                         ISNULL((
@@ -499,7 +501,8 @@ namespace PosDashboard.Web.Modules.System
                     RemainingSessions: remaining,
                     IsCompleted: isCompleted,
                     Status: computedStatus,
-                    IsOnline: Convert.ToInt32(r.IsOnline) == 1
+                    IsOnline: Convert.ToInt32(r.IsOnline) == 1,
+                    InvoiceNumber: (string?)r.InvoiceNumber
                 ));
             }
 
@@ -591,17 +594,21 @@ namespace PosDashboard.Web.Modules.System
 
             Guid customerRef = (Guid)cust.RefGuide;
 
+            // Reserve a sequential, per-day package invoice number (PKG-yyyyMMdd-NNNN)
+            // so the assignment can be printed as a full invoice like POS / New Sale.
+            string invoiceNumber = InvoiceNumberService.Next(conn, InvoiceNumberService.PrefixPackage);
+
             var cpId = conn.Query<int>(@"
                 INSERT INTO dbo.CustomerPackages (
                     PackageId, CustomerRef, Amount, IsPaid, ShiftId,
                     Served, Deleted, ExpiryDate, isOnline,
-                    AddedBy, AddedDate
+                    InvoiceNumber, AddedBy, AddedDate
                 )
                 OUTPUT INSERTED.Id
                 VALUES (
                     @PackageId, @CustomerRef, @Amount, 1, @ShiftId,
                     0, 0, @ExpiryDate, 0,
-                    @AddedBy, @AddedDate
+                    @InvoiceNumber, @AddedBy, @AddedDate
                 )",
                 new
                 {
@@ -610,6 +617,7 @@ namespace PosDashboard.Web.Modules.System
                     Amount = amount,
                     ShiftId = DEFAULT_SHIFT_ID,
                     ExpiryDate = expiry,
+                    InvoiceNumber = invoiceNumber,
                     AddedBy = userId,
                     AddedDate = now
                 }).FirstOrDefault();
@@ -924,6 +932,7 @@ namespace PosDashboard.Web.Modules.System
                     ), 0) AS PaidAmount,
                     CAST(ISNULL(cp.IsPaid, 0) AS bit) AS IsPaid,
                     ISNULL(cp.isOnline, 0) AS IsOnline,
+                    cp.InvoiceNumber,
                     cp.AddedDate,
                     cp.ExpiryDate
                 FROM dbo.CustomerPackages cp
@@ -1038,7 +1047,8 @@ namespace PosDashboard.Web.Modules.System
                 RemainingSessions: remaining,
                 IsCompleted: isCompleted,
                 Status: computedStatus,
-                IsOnline: Convert.ToInt32(r.IsOnline) == 1
+                IsOnline: Convert.ToInt32(r.IsOnline) == 1,
+                InvoiceNumber: (string?)r.InvoiceNumber
             );
 
             return new CustomerPackageDetailDto(assignment, sessions, payments);

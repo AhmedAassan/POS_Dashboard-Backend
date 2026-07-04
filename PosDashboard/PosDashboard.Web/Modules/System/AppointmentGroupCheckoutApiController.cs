@@ -22,6 +22,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Serenity.Data;
+using PosDashboard.Web.Modules.System.Services;
 using System;
 using System.Collections.Generic;
 using System.Data;
@@ -186,7 +187,7 @@ namespace PosDashboard.Web.Modules.System
                     new { Ids = memberIds }).FirstOrDefault();
 
                 // ONE consolidated invoice anchored on the entry appointment.
-                var invoiceNumber = GenerateInvoiceNumber();
+                var invoiceNumber = InvoiceNumberService.Next(uow.Connection, InvoiceNumberService.PrefixInvoice);
                 var invoiceId = SqlMapper.Query<int>(uow.Connection, @"
                     INSERT INTO dbo.AppointmentInvoices (
                         InvoiceNumber, AppointmentId, BranchId, CustomerId,
@@ -467,11 +468,6 @@ namespace PosDashboard.Web.Modules.System
                 new { Id = appointmentId, GrandTotal = originalPrice + extrasTotal });
         }
 
-        private static string GenerateInvoiceNumber()
-        {
-            var datePart = DateTime.UtcNow.ToString("yyyyMMdd");
-            var randomPart = Guid.NewGuid().ToString("N").Substring(0, 5).ToUpperInvariant();
-            return $"INV-{datePart}-{randomPart}";
-        }
+
     }
 }

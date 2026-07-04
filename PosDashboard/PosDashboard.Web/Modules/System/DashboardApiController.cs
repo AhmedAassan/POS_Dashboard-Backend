@@ -511,7 +511,7 @@ namespace PosDashboard.Web.Modules.System
                     UNION ALL
 
                     SELECT
-                        'PKG-' + CAST(pp.Id AS varchar(20)),
+                        COALESCE(cp.InvoiceNumber, 'PKG-' + CAST(pp.Id AS varchar(20))),
                         'PACKAGE_SALE', NULL,
                         c.CUSTOMER_NAME, NULL, CASE WHEN @Lang = 'ar' THEN pkg.ArabicName ELSE pkg.EnglishName END,
                         pp.PaymentAmount,

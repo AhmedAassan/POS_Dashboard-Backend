@@ -448,7 +448,7 @@ namespace PosDashboard.Web.Modules.System
                                  VoucherCode, PaidAt, IsWalletPayment)  
                             VALUES 
                                 (@AppointmentId, @Amount, @PaymentTypeId,
-                                 @PaymentAs, NULL, SYSUTCDATETIME(), 0)", 
+                                 @PaymentAs, NULL, SYSUTCDATETIME(), 0)",
                             new
                             {
                                 AppointmentId = appointmentId,
@@ -456,7 +456,7 @@ namespace PosDashboard.Web.Modules.System
                                 PaymentTypeId = onlinePaymentTypeId!.Value,
                                 PaymentAs = paymentAs
                             });
-                        
+
                         // إشعار الموظف بعد تأكيد الدفع (للحجوزات الأونلاين فقط)
                         try { await SendStaffBookingNotifyAsync(conn, appointmentId); }
                         catch (Exception ex) { Debug.WriteLine($"[Staff Notify] {ex.Message}"); }
@@ -477,7 +477,7 @@ namespace PosDashboard.Web.Modules.System
                                 WHERE BRANCH_ID = @Id",
                                     new { Id = (int)apt.BranchId }).FirstOrDefault() ?? "KWD";
 
-                                var invoiceNumber = $"INV-{DateTime.UtcNow:yyyyMMdd}-{appointmentId}";
+                                var invoiceNumber = InvoiceNumberService.Next(conn, InvoiceNumberService.PrefixInvoice);
 
                                 conn.Execute(@"
                                 INSERT INTO dbo.AppointmentInvoices (
@@ -980,7 +980,7 @@ namespace PosDashboard.Web.Modules.System
                 await httpClient.PostAsync(
                     "https://business.enjazatik.com/api/v1/send-message", content);
 
-                
+
             }
             catch (Exception ex)
             {

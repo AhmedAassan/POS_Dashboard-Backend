@@ -122,7 +122,8 @@ namespace PosDashboard.Web.Modules.System.Models
             int RemainingSessions,
             bool IsCompleted,
             string Status,
-            bool IsOnline
+            bool IsOnline,
+            string? InvoiceNumber
         );
 
         public record CustomerPackageDetailDto(

@@ -639,7 +639,9 @@ namespace PosDashboard.Web.Modules.System
                     }
 
                     int leadApptId = apptIds[0];
-                    string invoiceNumber = GenerateInvoiceNumber();
+                    // Sequential, gap-free, per-day number (POS-yyyyMMdd-NNNN) reserved
+                    // on the transactional connection so it rolls back with the checkout.
+                    string invoiceNumber = InvoiceNumberService.Next(uow.Connection, InvoiceNumberService.PrefixPos);
 
                     int? invoicePaymentTypeId = (int?)splits.FirstOrDefault()?.PaymentTypeId ?? walletPtId;
                     if (invoicePaymentTypeId == null)
@@ -1329,13 +1331,6 @@ namespace PosDashboard.Web.Modules.System
         {
             if (master <= 0m || sale >= master) return 0m;
             return Math.Round((master - sale) / master * 100m, 2);
-        }
-
-        private static string GenerateInvoiceNumber()
-        {
-            var datePart = DateTime.UtcNow.ToString("yyyyMMdd");
-            var randomPart = Guid.NewGuid().ToString("N").Substring(0, 5).ToUpperInvariant();
-            return $"POS-{datePart}-{randomPart}";
         }
 
         /// <summary>Generates a unique 8-digit numeric barcode for a service label.</summary>

@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Serenity.Data;
+using PosDashboard.Web.Modules.System.Services;
 using System;
 using System.Collections.Generic;
 using System.Data;
@@ -38,13 +39,6 @@ namespace PosDashboard.Web.Modules.System
             result = TimeSpan.Zero;
             if (string.IsNullOrWhiteSpace(time)) return false;
             return TimeSpan.TryParseExact(time, @"hh\:mm", null, out result);
-        }
-
-        private string GenerateInvoiceNumber()
-        {
-            var datePart = DateTime.UtcNow.ToString("yyyyMMdd");
-            var randomPart = Guid.NewGuid().ToString("N")[..5].ToUpper();
-            return $"INV-{datePart}-{randomPart}";
         }
 
         #endregion
@@ -965,7 +959,7 @@ namespace PosDashboard.Web.Modules.System
                 new { Id = id });
 
             // Create invoice
-            var invoiceNumber = GenerateInvoiceNumber();
+            var invoiceNumber = InvoiceNumberService.Next(conn, InvoiceNumberService.PrefixInvoice);
             decimal totalPrice = (decimal)apt.TotalPrice;
             decimal paidAmount = (decimal)apt.PaidAmount;
             decimal remainingAmount = totalPrice - paidAmount;
