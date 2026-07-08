@@ -1267,6 +1267,8 @@ namespace PosDashboard.Web.Modules.System
                 inv.TotalAmount, inv.PaidAmount, inv.RemainingAmount,
                 inv.Currency, inv.PaymentTypeId, inv.PaymentStatus, inv.CreatedAt,
                 inv.PackageOfferName, inv.PackageOfferPrice,
+                ISNULL(inv.SubTotal, inv.TotalAmount) AS SubTotal,
+                inv.DiscountType, inv.DiscountValue, ISNULL(inv.DiscountAmount, 0) AS DiscountAmount,
                 ISNULL(inv.IsFullyRefunded, 0)     AS IsFullyRefunded,
                 ISNULL(inv.IsPartiallyRefunded, 0) AS IsPartiallyRefunded
             FROM dbo.AppointmentInvoices inv
@@ -1285,6 +1287,8 @@ namespace PosDashboard.Web.Modules.System
                     inv.TotalAmount, inv.PaidAmount, inv.RemainingAmount,
                     inv.Currency, inv.PaymentTypeId, inv.PaymentStatus, inv.CreatedAt,
                     inv.PackageOfferName, inv.PackageOfferPrice,
+                    ISNULL(inv.SubTotal, inv.TotalAmount) AS SubTotal,
+                    inv.DiscountType, inv.DiscountValue, ISNULL(inv.DiscountAmount, 0) AS DiscountAmount,
                     ISNULL(inv.IsFullyRefunded, 0)     AS IsFullyRefunded,
                     ISNULL(inv.IsPartiallyRefunded, 0) AS IsPartiallyRefunded
                 FROM dbo.AppointmentInvoiceLines ail
@@ -1318,6 +1322,7 @@ namespace PosDashboard.Web.Modules.System
             1                         AS Quantity,
             ail.DiscountedUnitPrice   AS UnitPrice,
             ail.TotalPrice            AS TotalPrice,
+            ISNULL(ail.OriginalUnitPrice, ail.DiscountedUnitPrice) AS OriginalUnitPrice,
             ail.PackageOfferId        AS PackageOfferId,
             ail.PackageOfferName      AS PackageOfferName,
             ail.PackageGroupId        AS PackageGroupId
@@ -1363,7 +1368,9 @@ namespace PosDashboard.Web.Modules.System
                         PackageOfferName: sl.PackageOfferName == null || sl.PackageOfferName is DBNull
                             ? null : (string)sl.PackageOfferName,
                         PackageGroupId: sl.PackageGroupId == null || sl.PackageGroupId is DBNull
-                            ? (Guid?)null : (Guid)sl.PackageGroupId
+                            ? (Guid?)null : (Guid)sl.PackageGroupId,
+                        OriginalUnitPrice: sl.OriginalUnitPrice == null || sl.OriginalUnitPrice is DBNull
+                            ? (decimal?)null : (decimal)sl.OriginalUnitPrice
                     ));
                 }
             }
@@ -1597,7 +1604,15 @@ namespace PosDashboard.Web.Modules.System
                 IsFullyRefunded: isFullyRefunded,
                 IsPartiallyRefunded: isPartiallyRefunded,
                 RefundLines: refundLines,
-                Labels: labels
+                Labels: labels,
+                SubTotal: invoice.SubTotal is DBNull || invoice.SubTotal == null
+                    ? (decimal)invoice.TotalAmount : (decimal)invoice.SubTotal,
+                DiscountType: invoice.DiscountType is DBNull || invoice.DiscountType == null
+                    ? null : (string?)invoice.DiscountType,
+                DiscountValue: invoice.DiscountValue is DBNull || invoice.DiscountValue == null
+                    ? (decimal?)null : (decimal?)invoice.DiscountValue,
+                DiscountAmount: invoice.DiscountAmount is DBNull || invoice.DiscountAmount == null
+                    ? 0m : (decimal)invoice.DiscountAmount
             );
 
             return Ok(new ApiResult<DetailedInvoiceDto>(true, null, dto));

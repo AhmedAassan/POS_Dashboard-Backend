@@ -158,6 +158,15 @@ namespace PosDashboard.Web.Modules.System.Models
             List<PosCheckoutPackageLineRequest> Lines
         );
 
+        // Ticket-level discount. Applies to STANDALONE SERVICES only — never to
+        // OFFER packages. Type is "percentage" (0..100) or "fixed" (a currency
+        // amount, capped at the services subtotal). Value <= 0 or a missing
+        // Discount object means "no discount".
+        public record PosDiscountRequest(
+            string Type,        // "percentage" | "fixed"
+            decimal Value       // percent (0..100) OR fixed money amount
+        );
+
         public record PosCheckoutRequest(
             int BranchId,
             int CustomerId,
@@ -165,7 +174,8 @@ namespace PosDashboard.Web.Modules.System.Models
             List<PosCheckoutLineRequest> Lines,          // standalone extra services
             PosPaymentsRequest? Payments,
             bool SendWhatsApp,
-            List<PosCheckoutPackageRequest>? Packages = null   // selected OFFER packages
+            List<PosCheckoutPackageRequest>? Packages = null,  // selected OFFER packages
+            PosDiscountRequest? Discount = null                // ticket discount on services
         );
 
         // =====================================================================
@@ -224,7 +234,9 @@ namespace PosDashboard.Web.Modules.System.Models
             bool WhatsAppSent,
             string? WhatsAppError,
             string? InvoicePdfUrl,
-            List<PosLabelDto> Labels       // un-staffed service labels (empty when every line had a staff)
+            List<PosLabelDto> Labels,      // un-staffed service labels (empty when every line had a staff)
+            decimal SubTotal = 0m,         // services + offers BEFORE the ticket discount
+            decimal DiscountAmount = 0m    // money deducted by the ticket discount (0 = none)
         );
 
         // =====================================================================
@@ -242,11 +254,12 @@ namespace PosDashboard.Web.Modules.System.Models
             string StaffName,           // "" when un-staffed
             string StaffNameAr,
             int Quantity,
-            decimal UnitPrice,
-            decimal TotalPrice,
+            decimal UnitPrice,          // charged unit price AFTER the ticket discount (revenue)
+            decimal TotalPrice,         // charged line total AFTER the ticket discount (revenue)
             int? PackageOfferId,
             string? PackageOfferName,
-            Guid? PackageGroupId
+            Guid? PackageGroupId,
+            decimal OriginalUnitPrice = 0m  // listed unit price BEFORE the ticket discount (display)
         );
 
         public record PosReceiptPaymentDto(
@@ -285,7 +298,11 @@ namespace PosDashboard.Web.Modules.System.Models
             List<PosReceiptPaymentDto> Payments,
             PosCompanyInfoDto? Company,
             string? InvoicePdfUrl,
-            List<PosLabelDto> Labels       // labels for this invoice (empty when none)
+            List<PosLabelDto> Labels,      // labels for this invoice (empty when none)
+            decimal SubTotal = 0m,         // services + offers BEFORE the ticket discount
+            string? DiscountType = null,   // "percentage" | "fixed" | null (no discount)
+            decimal? DiscountValue = null, // the raw entered value (10 => 10% / 5.000 => fixed)
+            decimal DiscountAmount = 0m    // money deducted by the ticket discount (0 = none)
         );
     }
 }

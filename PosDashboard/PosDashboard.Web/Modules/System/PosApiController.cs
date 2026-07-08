@@ -71,6 +71,23 @@ namespace PosDashboard.Web.Modules.System
                 using var conn = sqlConnections.NewByKey("Default");
                 if (conn.State != ConnectionState.Open) conn.Open();
 
+                // If the caller didn't pin a branch explicitly, use the branch the
+                // logged-in user is linked to (USER.BRANCH_ID). This drives the POS
+                // currency/tax/round-off from the user's own branch. Falls back to the
+                // first active branch below when the user has no branch assigned.
+                if (branchId == null)
+                {
+                    int currentUserId = ResolveCurrentUserId();
+                    if (currentUserId > 0)
+                    {
+                        var userBranchRow = SqlMapper.Query<int?>(conn,
+                            "SELECT BRANCH_ID FROM dbo.[USER] WHERE USER_ID = @UserId",
+                            new { UserId = currentUserId }).FirstOrDefault();
+                        if (userBranchRow.HasValue)
+                            branchId = userBranchRow.Value;
+                    }
+                }
+
                 // -------- Branch (resolve a default if none supplied) --------
                 var branch = SqlMapper.Query(conn, @"
                     SELECT TOP 1
@@ -424,6 +441,7 @@ namespace PosDashboard.Web.Modules.System
                         DurationMinutes = duration,
                         UnitPrice = masterPrice,
                         SalePrice = salePrice,
+                        OriginalUnitPrice = salePrice,   // pre-ticket-discount (override ?? master)
                         StartTime = start,
                         EndTime = end,
                         Notes = string.IsNullOrWhiteSpace(line.Notes) ? null : line.Notes.Trim()
@@ -512,12 +530,38 @@ namespace PosDashboard.Web.Modules.System
                     }
 
                     DistributePackagePrice(pkgLines, pkgPrice, roundDigits);
+                    // Packages are NOT eligible for the ticket discount — their listed
+                    // (original) price equals the distributed share.
+                    foreach (var pl in pkgLines) pl.OriginalUnitPrice = pl.SalePrice;
                     resolved.AddRange(pkgLines);
                 }
 
                 if (resolved.Count == 0) return FailCheckout("Nothing to sell");
 
-                decimal grandTotal = resolved.Sum(x => x.SalePrice);
+                // -------- Ticket discount (SERVICES only, never OFFER packages) --------
+                // Services subtotal = standalone (non-package) lines at their pre-discount
+                // price. The discount is spread across those lines so each line's SalePrice
+                // becomes the AFTER-discount value used everywhere (invoice total, revenue,
+                // staff performance). Package lines are untouched.
+                var serviceLines = resolved.Where(l => l.PackageOfferId == null).ToList();
+                decimal servicesSubtotal = serviceLines.Sum(l => l.OriginalUnitPrice);
+                string? discountType = request.Discount?.Type?.Trim().ToLowerInvariant();
+                decimal discountValueRaw = request.Discount?.Value ?? 0m;
+                // The POS UI works in 2 decimals (round2) and builds the payment splits from
+                // that total, so the discount MUST be rounded the same way here or the
+                // fully-paid check below could reject a legitimate sale.
+                const int discountDigits = 2;
+                decimal discountAmount = ComputeDiscountAmount(discountType, discountValueRaw, servicesSubtotal, discountDigits);
+
+                // Normalise the stored type/value so a no-op discount is persisted as NULL.
+                string? storedDiscountType = discountAmount > 0m ? discountType : null;
+                decimal? storedDiscountValue = discountAmount > 0m ? discountValueRaw : (decimal?)null;
+
+                if (discountAmount > 0m)
+                    DistributeDiscount(serviceLines, discountAmount, discountDigits);
+
+                decimal subTotal = resolved.Sum(x => x.OriginalUnitPrice);   // services + offers, pre-discount
+                decimal grandTotal = resolved.Sum(x => x.SalePrice);         // after discount
 
                 // -------- Validate payments (POS = pay now in full) --------
                 decimal walletAmount = 0m;
@@ -652,13 +696,15 @@ namespace PosDashboard.Web.Modules.System
                         INSERT INTO dbo.AppointmentInvoices (
                             InvoiceNumber, AppointmentId, BranchId, CustomerId,
                             TotalAmount, PaidAmount, RemainingAmount, Currency,
-                            PaymentTypeId, PaymentStatus, CreatedAt
+                            PaymentTypeId, PaymentStatus, CreatedAt,
+                            SubTotal, DiscountType, DiscountValue, DiscountAmount
                         )
                         OUTPUT INSERTED.Id
                         VALUES (
                             @InvoiceNumber, @AppointmentId, @BranchId, @CustomerId,
                             @TotalAmount, @PaidAmount, 0, @Currency,
-                            @PaymentTypeId, 'FULL', SYSUTCDATETIME()
+                            @PaymentTypeId, 'FULL', SYSUTCDATETIME(),
+                            @SubTotal, @DiscountType, @DiscountValue, @DiscountAmount
                         )",
                         new
                         {
@@ -669,7 +715,11 @@ namespace PosDashboard.Web.Modules.System
                             TotalAmount = grandTotal,
                             PaidAmount = paidTotal,
                             Currency = currency,
-                            PaymentTypeId = invoicePaymentTypeId
+                            PaymentTypeId = invoicePaymentTypeId,
+                            SubTotal = subTotal,
+                            DiscountType = storedDiscountType,
+                            DiscountValue = storedDiscountValue,
+                            DiscountAmount = discountAmount
                         }).First();
 
                     // 3) Invoice lines
@@ -680,14 +730,14 @@ namespace PosDashboard.Web.Modules.System
                         int newLineId = SqlMapper.Query<int>(uow.Connection, @"
                             INSERT INTO dbo.AppointmentInvoiceLines (
                                 InvoiceId, AppointmentId, ItemId, UnitId, StaffId,
-                                UnitPrice, DiscountedUnitPrice, TotalPrice,
+                                UnitPrice, DiscountedUnitPrice, TotalPrice, OriginalUnitPrice,
                                 AppointmentDate, StartTime, EndTime, DurationMinutes, Notes,
                                 PackageOfferId, PackageGroupId, PackageOfferName
                             )
                             OUTPUT INSERTED.Id
                             VALUES (
                                 @InvoiceId, @AppointmentId, @ItemId, @UnitId, @StaffId,
-                                @UnitPrice, @DiscountedUnitPrice, @TotalPrice,
+                                @UnitPrice, @DiscountedUnitPrice, @TotalPrice, @OriginalUnitPrice,
                                 @AppointmentDate, @StartTime, @EndTime, @DurationMinutes, @Notes,
                                 @PackageOfferId, @PackageGroupId, @PackageOfferName
                             )",
@@ -701,6 +751,7 @@ namespace PosDashboard.Web.Modules.System
                                 rl.UnitPrice,
                                 DiscountedUnitPrice = rl.SalePrice,
                                 TotalPrice = rl.SalePrice,
+                                OriginalUnitPrice = rl.OriginalUnitPrice,
                                 AppointmentDate = saleDate,
                                 StartTime = rl.StartTime,
                                 EndTime = rl.EndTime,
@@ -838,6 +889,7 @@ namespace PosDashboard.Web.Modules.System
                                 currency: currency, currencyAr: currencyAr,
                                 invoiceNumber: invoiceNumber,
                                 grandTotal: grandTotal, paidTotal: paidTotal,
+                                subTotal: subTotal, discountAmount: discountAmount,
                                 lines: resolved);
                         }
                         catch (Exception ex) { waSent = false; waErr = $"Send failed: {ex.Message}"; }
@@ -858,7 +910,9 @@ namespace PosDashboard.Web.Modules.System
                         WhatsAppSent: waSent,
                         WhatsAppError: waErr,
                         InvoicePdfUrl: pdfUrl,
-                        Labels: labels);
+                        Labels: labels,
+                        SubTotal: subTotal,
+                        DiscountAmount: discountAmount);
 
                     return Ok(new PosDtos.ApiResult<PosDtos.PosCheckoutResponse>(true, null, response));
                 }
@@ -897,6 +951,10 @@ namespace PosDashboard.Web.Modules.System
                         inv.Currency        AS Currency,
                         inv.PaymentStatus   AS PaymentStatus,
                         inv.CreatedAt       AS CreatedAt,
+                        ISNULL(inv.SubTotal, inv.TotalAmount) AS SubTotal,
+                        inv.DiscountType    AS DiscountType,
+                        inv.DiscountValue   AS DiscountValue,
+                        ISNULL(inv.DiscountAmount, 0) AS DiscountAmount,
                         c.CUSTOMER_NAME     AS CustomerName,
                         c.CUSTOMER_PHONE1   AS CustomerPhone,
                         b.ArabicCurrencyName AS CurrencyAr
@@ -926,6 +984,7 @@ namespace PosDashboard.Web.Modules.System
                         s.ArabicName      AS StaffNameAr,
                         ail.DiscountedUnitPrice AS UnitPrice,
                         ail.TotalPrice    AS TotalPrice,
+                        ISNULL(ail.OriginalUnitPrice, ail.DiscountedUnitPrice) AS OriginalUnitPrice,
                         ail.PackageOfferId   AS PackageOfferId,
                         ail.PackageOfferName AS PackageOfferName,
                         ail.PackageGroupId   AS PackageGroupId
@@ -949,7 +1008,8 @@ namespace PosDashboard.Web.Modules.System
                         TotalPrice: (decimal)l.TotalPrice,
                         PackageOfferId: (int?)l.PackageOfferId,
                         PackageOfferName: (string?)l.PackageOfferName,
-                        PackageGroupId: (Guid?)l.PackageGroupId))
+                        PackageGroupId: (Guid?)l.PackageGroupId,
+                        OriginalUnitPrice: (decimal)l.OriginalUnitPrice))
                     .ToList();
 
                 var payments = SqlMapper.Query(conn, @"
@@ -1057,7 +1117,11 @@ namespace PosDashboard.Web.Modules.System
                     Payments: payments,
                     Company: companyDto,
                     InvoicePdfUrl: $"{Request.Scheme}://{Request.Host}/api/myfatoorah/invoice-pdf/{leadApptId}",
-                    Labels: labels);
+                    Labels: labels,
+                    SubTotal: (decimal)head.SubTotal,
+                    DiscountType: (string?)head.DiscountType,
+                    DiscountValue: (decimal?)head.DiscountValue,
+                    DiscountAmount: (decimal)head.DiscountAmount);
 
                 return Ok(new PosDtos.ApiResult<PosDtos.PosReceiptDto>(true, null, dto));
             }
@@ -1373,7 +1437,8 @@ namespace PosDashboard.Web.Modules.System
             IDbConnection conn, int appointmentId,
             string customerName, string customerPhone, string customerLang,
             string currency, string currencyAr, string invoiceNumber,
-            decimal grandTotal, decimal paidTotal, List<ResolvedLine> lines)
+            decimal grandTotal, decimal paidTotal, List<ResolvedLine> lines,
+            decimal subTotal = 0m, decimal discountAmount = 0m)
         {
             var config = SqlMapper.Query(conn, @"
                 SELECT TOP 1 HeaderText, FooterText, InstanceId, IsEnabled
@@ -1388,8 +1453,8 @@ namespace PosDashboard.Web.Modules.System
             string pdfUrl = $"{Request.Scheme}://{Request.Host}/api/myfatoorah/invoice-pdf/{appointmentId}";
 
             string message = customerLang == "en"
-                ? BuildReceiptEn(header, footer, invoiceNumber, lines, grandTotal, paidTotal, currency, pdfUrl)
-                : BuildReceiptAr(header, footer, invoiceNumber, lines, grandTotal, paidTotal, currencyAr, pdfUrl);
+                ? BuildReceiptEn(header, footer, invoiceNumber, lines, grandTotal, paidTotal, currency, pdfUrl, subTotal, discountAmount)
+                : BuildReceiptAr(header, footer, invoiceNumber, lines, grandTotal, paidTotal, currencyAr, pdfUrl, subTotal, discountAmount);
 
             string phone = NormalizePhone(customerPhone);
 
@@ -1409,7 +1474,8 @@ namespace PosDashboard.Web.Modules.System
 
         private static string BuildReceiptEn(
             string header, string footer, string invoiceNumber, List<ResolvedLine> lines,
-            decimal total, decimal paid, string currency, string pdfUrl)
+            decimal total, decimal paid, string currency, string pdfUrl,
+            decimal subTotal = 0m, decimal discountAmount = 0m)
         {
             var sb = new StringBuilder();
             if (!string.IsNullOrWhiteSpace(header)) { sb.AppendLine(header); sb.AppendLine(); }
@@ -1418,6 +1484,11 @@ namespace PosDashboard.Web.Modules.System
             sb.AppendLine("━━━━━━━━━━━━━━━━━━");
             sb.AppendLine($"Invoice: {invoiceNumber}");
             sb.AppendLine($"Services: {services}");
+            if (discountAmount > 0m)
+            {
+                sb.AppendLine($"Subtotal: {currency} {subTotal:F2}");
+                sb.AppendLine($"Discount: - {currency} {discountAmount:F2}");
+            }
             sb.AppendLine($"Total: {currency} {total:F2}");
             sb.AppendLine($"Paid: {currency} {paid:F2}");
             sb.AppendLine($"📄 Invoice: {pdfUrl}");
@@ -1429,7 +1500,8 @@ namespace PosDashboard.Web.Modules.System
 
         private static string BuildReceiptAr(
             string header, string footer, string invoiceNumber, List<ResolvedLine> lines,
-            decimal total, decimal paid, string currencyAr, string pdfUrl)
+            decimal total, decimal paid, string currencyAr, string pdfUrl,
+            decimal subTotal = 0m, decimal discountAmount = 0m)
         {
             var sb = new StringBuilder();
             if (!string.IsNullOrWhiteSpace(header)) { sb.AppendLine(header); sb.AppendLine(); }
@@ -1439,6 +1511,11 @@ namespace PosDashboard.Web.Modules.System
             sb.AppendLine("━━━━━━━━━━━━━━━━━━");
             sb.AppendLine($"الفاتورة: {invoiceNumber}");
             sb.AppendLine($"الخدمات: {services}");
+            if (discountAmount > 0m)
+            {
+                sb.AppendLine($"الإجمالي قبل الخصم: {subTotal:F2} {currencyAr}");
+                sb.AppendLine($"الخصم: - {discountAmount:F2} {currencyAr}");
+            }
             sb.AppendLine($"الإجمالي: {total:F2} {currencyAr}");
             sb.AppendLine($"المدفوع: {paid:F2} {currencyAr}");
             sb.AppendLine($"📄 الفاتورة: {pdfUrl}");
@@ -1572,6 +1649,11 @@ namespace PosDashboard.Web.Modules.System
             public int DurationMinutes { get; set; }
             public decimal UnitPrice { get; set; }
             public decimal SalePrice { get; set; }
+            /// <summary>Charged unit price BEFORE the ticket discount (= per-line override
+            /// or master for services; distributed share for package lines). Kept so the
+            /// receipt can print listed prices + a discount line, while SalePrice/TotalPrice
+            /// carry the AFTER-discount value used for revenue and staff performance.</summary>
+            public decimal OriginalUnitPrice { get; set; }
             public TimeSpan StartTime { get; set; }
             public TimeSpan EndTime { get; set; }
             public string? Notes { get; set; }
@@ -1603,6 +1685,64 @@ namespace PosDashboard.Web.Modules.System
 
                 if (share < 0m) share = 0m;
                 lines[i].SalePrice = share;
+                allocated += share;
+            }
+        }
+
+        // Computes the money amount a ticket discount removes from the services
+        // subtotal. "percentage" clamps to 0..100; "fixed" clamps to 0..subtotal.
+        // Anything else (unknown type, value <= 0, subtotal <= 0) => 0 (no discount).
+        private static decimal ComputeDiscountAmount(string? type, decimal value, decimal servicesSubtotal, int digits)
+        {
+            if (digits < 0) digits = 2;
+            if (servicesSubtotal <= 0m || value <= 0m || string.IsNullOrWhiteSpace(type))
+                return 0m;
+
+            decimal amount;
+            if (string.Equals(type, "percentage", StringComparison.OrdinalIgnoreCase))
+            {
+                decimal pct = Math.Min(100m, Math.Max(0m, value));
+                amount = Math.Round(servicesSubtotal * pct / 100m, digits, MidpointRounding.AwayFromZero);
+            }
+            else if (string.Equals(type, "fixed", StringComparison.OrdinalIgnoreCase))
+            {
+                amount = Math.Round(value, digits, MidpointRounding.AwayFromZero);
+            }
+            else
+            {
+                return 0m;
+            }
+
+            if (amount < 0m) amount = 0m;
+            if (amount > servicesSubtotal) amount = servicesSubtotal;   // never below zero
+            return amount;
+        }
+
+        // Spreads a ticket discount across the given SERVICE lines proportionally to
+        // each line's SalePrice, so the line totals sum EXACTLY to (subtotal - discount).
+        // The last line absorbs the rounding remainder. OriginalUnitPrice is preserved.
+        private static void DistributeDiscount(List<ResolvedLine> serviceLines, decimal discountAmount, int digits)
+        {
+            if (serviceLines.Count == 0 || discountAmount <= 0m) return;
+            if (digits < 0) digits = 2;
+
+            decimal baseSum = serviceLines.Sum(l => l.SalePrice);
+            if (baseSum <= 0m) return;
+
+            decimal targetTotal = baseSum - discountAmount;
+            if (targetTotal < 0m) targetTotal = 0m;
+
+            decimal allocated = 0m;
+            for (int i = 0; i < serviceLines.Count; i++)
+            {
+                decimal share;
+                if (i == serviceLines.Count - 1)
+                    share = targetTotal - allocated;                  // last line = remainder
+                else
+                    share = Math.Round(targetTotal * (serviceLines[i].SalePrice / baseSum), digits, MidpointRounding.AwayFromZero);
+
+                if (share < 0m) share = 0m;
+                serviceLines[i].SalePrice = share;                    // AFTER-discount price
                 allocated += share;
             }
         }

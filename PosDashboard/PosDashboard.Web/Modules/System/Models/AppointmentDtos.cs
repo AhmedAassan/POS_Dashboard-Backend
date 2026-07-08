@@ -229,7 +229,11 @@ namespace PosDashboard.Web.Modules.System.Models
             // render as one package block (fixed price). Null = standalone extra line.
             int? PackageOfferId = null,
             string? PackageOfferName = null,
-            Guid? PackageGroupId = null
+            Guid? PackageGroupId = null,
+            // Listed unit price BEFORE the POS ticket discount (display only).
+            // UnitPrice/TotalPrice remain the CHARGED (after-discount) values used
+            // for refunds and revenue. Null for legacy/non-discounted lines.
+            decimal? OriginalUnitPrice = null
         );
 
         /// <summary>One refund transaction linked to this invoice</summary>
@@ -282,7 +286,13 @@ namespace PosDashboard.Web.Modules.System.Models
             bool IsPartiallyRefunded,
             List<RefundLineDto> RefundLines,
             // POS service labels (un-staffed services). Empty for normal invoices.
-            List<InvoiceLabelDto>? Labels = null
+            List<InvoiceLabelDto>? Labels = null,
+            // POS ticket discount (services only). SubTotal is the pre-discount amount;
+            // DiscountAmount = 0 / DiscountType = null means no discount.
+            decimal SubTotal = 0m,
+            string? DiscountType = null,
+            decimal? DiscountValue = null,
+            decimal DiscountAmount = 0m
         );
 
         /*split payment history*/

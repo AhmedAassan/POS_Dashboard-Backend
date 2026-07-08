@@ -110,7 +110,10 @@ namespace PosDashboard.Web.Modules.System
                     FromDateOnly = fromDateOnly.Date,
                     ToDateOnly = toDateOnly.Date,
                     StaffId = staffId,
-                    Lang = langCode
+                    Lang = langCode,
+                    // Transaction timestamps (CreatedAt/PaidAt/ProcessedAt/...) are stored in UTC.
+                    // Add the branch tz offset so the displayed [Time] matches local wall-clock.
+                    TzOffset = tzOffset
                 };
 
                 // ---------- 2A: Revenue KPIs ----------
@@ -566,7 +569,7 @@ namespace PosDashboard.Web.Modules.System
                     StaffName, ServiceName, Amount, PaymentTypeName,
                     PaymentBreakdownJson,
                     AppointmentId,
-                    CONVERT(varchar(5), TxAt, 108) AS [Time],
+                    CONVERT(varchar(5), DATEADD(HOUR, @TzOffset, TxAt), 108) AS [Time],
                     Status,
                     PackageOfferId,
                     PackageOfferName,
