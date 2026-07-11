@@ -175,7 +175,11 @@ namespace PosDashboard.Web.Modules.System.Models
             PosPaymentsRequest? Payments,
             bool SendWhatsApp,
             List<PosCheckoutPackageRequest>? Packages = null,  // selected OFFER packages
-            PosDiscountRequest? Discount = null                // ticket discount on services
+            PosDiscountRequest? Discount = null,               // ticket discount on services
+                                                               // Customer discount code (CARD-######). When present it OVERRIDES the manual
+                                                               // Discount above and is applied to the SERVICES subtotal only (never OFFER
+                                                               // packages). The code is validated + redeemed atomically inside checkout.
+            string? DiscountCode = null
         );
 
         // =====================================================================
@@ -236,7 +240,9 @@ namespace PosDashboard.Web.Modules.System.Models
             string? InvoicePdfUrl,
             List<PosLabelDto> Labels,      // un-staffed service labels (empty when every line had a staff)
             decimal SubTotal = 0m,         // services + offers BEFORE the ticket discount
-            decimal DiscountAmount = 0m    // money deducted by the ticket discount (0 = none)
+            decimal DiscountAmount = 0m,   // money deducted by the ticket discount (0 = none)
+            string? DiscountCode = null,   // the redeemed CARD-###### (null = none)
+            int? DiscountCodeId = null     // its id (null = none)
         );
 
         // =====================================================================

@@ -547,6 +547,48 @@ namespace PosDashboard.Web.Modules.System
                 decimal servicesSubtotal = serviceLines.Sum(l => l.OriginalUnitPrice);
                 string? discountType = request.Discount?.Type?.Trim().ToLowerInvariant();
                 decimal discountValueRaw = request.Discount?.Value ?? 0m;
+
+                // -------- Customer discount code (CARD-######) --------
+                // When a code is supplied it OVERRIDES any manual ticket discount and is
+                // applied to the SERVICES subtotal only. It is validated here and then
+                // redeemed (used-count + redemption row) inside the transaction below.
+                int? redeemedCodeId = null;
+                string? redeemedCode = null;
+                if (!string.IsNullOrWhiteSpace(request.DiscountCode))
+                {
+                    string codeInput = request.DiscountCode.Trim().ToUpperInvariant();
+                    var dc = SqlMapper.Query(conn, @"
+                        SELECT dc.Id, dc.DiscountType, dc.DiscountAmount, dc.MaxUses,
+                               dc.UsedCount, dc.ExpiresAt,
+                               ISNULL(t.IsActive, 1) AS TemplateActive
+                        FROM dbo.DiscountCodes dc
+                        LEFT JOIN dbo.DiscountTemplates t ON t.Id = dc.TemplateId
+                        WHERE dc.Code = @Code AND dc.Deleted = 0",
+                        new { Code = codeInput }).FirstOrDefault();
+
+                    if (dc == null) return FailCheckout($"Discount code '{codeInput}' not found");
+
+                    DateTime? codeExpiresAt = (DateTime?)dc.ExpiresAt;
+                    int codeUsed = (int)dc.UsedCount;
+                    int codeMax = (int)dc.MaxUses;
+                    if (codeExpiresAt.HasValue && codeExpiresAt.Value < DateTime.UtcNow)
+                        return FailCheckout("Discount code has expired");
+                    if (codeUsed >= codeMax)
+                        return FailCheckout("Discount code usage limit reached");
+                    if (!(bool)dc.TemplateActive)
+                        return FailCheckout("Discount code template is inactive");
+                    if (servicesSubtotal <= 0m)
+                        return FailCheckout("Discount code applies to services only — add a service first");
+
+                    // Map the code's type to the ticket-discount vocabulary
+                    // ('value' -> 'fixed', 'percentage' -> 'percentage').
+                    string codeType = (string)dc.DiscountType;
+                    discountType = codeType == "percentage" ? "percentage" : "fixed";
+                    discountValueRaw = (decimal)dc.DiscountAmount;
+
+                    redeemedCodeId = (int)dc.Id;
+                    redeemedCode = codeInput;
+                }
                 // The POS UI works in 2 decimals (round2) and builds the payment splits from
                 // that total, so the discount MUST be rounded the same way here or the
                 // fully-paid check below could reject a legitimate sale.
@@ -697,14 +739,16 @@ namespace PosDashboard.Web.Modules.System
                             InvoiceNumber, AppointmentId, BranchId, CustomerId,
                             TotalAmount, PaidAmount, RemainingAmount, Currency,
                             PaymentTypeId, PaymentStatus, CreatedAt,
-                            SubTotal, DiscountType, DiscountValue, DiscountAmount
+                            SubTotal, DiscountType, DiscountValue, DiscountAmount,
+                            DiscountCode, DiscountCodeId
                         )
                         OUTPUT INSERTED.Id
                         VALUES (
                             @InvoiceNumber, @AppointmentId, @BranchId, @CustomerId,
                             @TotalAmount, @PaidAmount, 0, @Currency,
                             @PaymentTypeId, 'FULL', SYSUTCDATETIME(),
-                            @SubTotal, @DiscountType, @DiscountValue, @DiscountAmount
+                            @SubTotal, @DiscountType, @DiscountValue, @DiscountAmount,
+                            @DiscountCode, @DiscountCodeId
                         )",
                         new
                         {
@@ -719,7 +763,9 @@ namespace PosDashboard.Web.Modules.System
                             SubTotal = subTotal,
                             DiscountType = storedDiscountType,
                             DiscountValue = storedDiscountValue,
-                            DiscountAmount = discountAmount
+                            DiscountAmount = discountAmount,
+                            DiscountCode = redeemedCode,
+                            DiscountCodeId = redeemedCodeId
                         }).First();
 
                     // 3) Invoice lines
@@ -866,6 +912,41 @@ namespace PosDashboard.Web.Modules.System
                             });
                     }
 
+                    // 6) Redeem the discount code (atomic — rolls back with the sale).
+                    //    The guard (UsedCount < MaxUses) prevents two concurrent sales from
+                    //    pushing the same code past its limit.
+                    if (redeemedCodeId.HasValue)
+                    {
+                        int bumped = SqlMapper.Execute(uow.Connection, @"
+                            UPDATE dbo.DiscountCodes
+                            SET UsedCount = UsedCount + 1
+                            WHERE Id = @Id AND Deleted = 0 AND UsedCount < MaxUses",
+                            new { Id = redeemedCodeId.Value });
+
+                        if (bumped == 0)
+                            throw new InvalidOperationException("Discount code was just exhausted by another sale");
+
+                        SqlMapper.Execute(uow.Connection, @"
+                            INSERT INTO dbo.DiscountCodeRedemptions (
+                                DiscountCodeId, InvoiceId, InvoiceNumber, InvoiceValue,
+                                DiscountAmount, RedeemedByCustomerId, RedeemedByUserId, RedeemedAt
+                            )
+                            VALUES (
+                                @DiscountCodeId, @InvoiceId, @InvoiceNumber, @InvoiceValue,
+                                @DiscountAmount, @RedeemedByCustomerId, @RedeemedByUserId, SYSUTCDATETIME()
+                            )",
+                            new
+                            {
+                                DiscountCodeId = redeemedCodeId.Value,
+                                InvoiceId = invoiceId,
+                                InvoiceNumber = invoiceNumber,
+                                InvoiceValue = grandTotal,
+                                DiscountAmount = discountAmount,
+                                RedeemedByCustomerId = request.CustomerId,
+                                RedeemedByUserId = currentUserId > 0 ? currentUserId : (int?)null
+                            });
+                    }
+
                     uow.Commit();
 
                     // Store the invoice PDF so the invoice-pdf link works for POS too.
@@ -912,7 +993,9 @@ namespace PosDashboard.Web.Modules.System
                         InvoicePdfUrl: pdfUrl,
                         Labels: labels,
                         SubTotal: subTotal,
-                        DiscountAmount: discountAmount);
+                        DiscountAmount: discountAmount,
+                        DiscountCode: redeemedCode,
+                        DiscountCodeId: redeemedCodeId);
 
                     return Ok(new PosDtos.ApiResult<PosDtos.PosCheckoutResponse>(true, null, response));
                 }
