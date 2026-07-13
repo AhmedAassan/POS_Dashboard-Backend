@@ -1224,6 +1224,9 @@ namespace PosDashboard.Web.Modules.System
         // =====================================================================
 
         /// <summary>Find a single label by its barcode/QR value (8 digits). Used by scan + manual entry.</summary>
+        // [AllowAnonymous]: reachable from the phone-camera "scan → assign" deep link
+        // (/assign?code=), which runs on a device that is NOT logged into the POS.
+        [AllowAnonymous]
         [HttpGet("labels/lookup")]
         public ActionResult<PosDtos.ApiResult<PosDtos.PosLabelDto>> LookupLabel([FromQuery] string barcode)
         {
@@ -1248,6 +1251,8 @@ namespace PosDashboard.Web.Modules.System
         }
 
         /// <summary>List labels still awaiting staff assignment (optionally filtered by branch + free text).</summary>
+        // [AllowAnonymous]: part of the phone-camera "scan → assign" flow (see labels/lookup).
+        [AllowAnonymous]
         [HttpGet("labels/unassigned")]
         public ActionResult<PosDtos.ApiResult<List<PosDtos.PosLabelDto>>> UnassignedLabels(
             [FromQuery] int? branchId, [FromQuery] string? search, [FromQuery] int? take)
@@ -1284,6 +1289,15 @@ namespace PosDashboard.Web.Modules.System
         /// (AppointmentData + AppointmentInvoiceLines) and marks the label assigned.
         /// Already-assigned / unknown labels (or unknown staff) are skipped, not an error.
         /// </summary>
+        // [AllowAnonymous]: the phone-camera flow assigns from a device that is not
+        // logged in. The worker only supplies a STAFF CODE, which is resolved to a
+        // StaffId server-side (see below) so the staff roster is never exposed.
+        // [IgnoreAntiforgeryToken]: the global AutoValidateAntiforgeryIgnoreBearer
+        // filter enforces a CSRF token on non-Bearer POSTs. This public endpoint is
+        // called without a session/cookie, so there is no ambient auth to forge —
+        // skip the antiforgery check (otherwise anonymous callers get a 400).
+        [AllowAnonymous]
+        [IgnoreAntiforgeryToken]
         [HttpPost("labels/assign")]
         public ActionResult<PosDtos.ApiResult<PosDtos.PosAssignLabelsResponse>> AssignLabels(
             [FromBody] PosDtos.PosAssignLabelsRequest request)
@@ -1296,38 +1310,59 @@ namespace PosDashboard.Web.Modules.System
                 using var conn = sqlConnections.NewByKey("Default");
                 if (conn.State != ConnectionState.Open) conn.Open();
 
-                // de-dup by label (last write wins) and keep only valid pairs
-                var pairs = request.Assignments
-                    .Where(a => a != null && a.LabelId > 0 && a.StaffId > 0)
+                // de-dup by label (last write wins); keep the whole item so we can
+                // resolve either an explicit StaffId or a typed staff code.
+                var items = request.Assignments
+                    .Where(a => a != null && a.LabelId > 0)
                     .GroupBy(a => a.LabelId)
-                    .ToDictionary(g => g.Key, g => g.Last().StaffId);
+                    .ToDictionary(g => g.Key, g => g.Last());
 
-                if (pairs.Count == 0)
+                if (items.Count == 0)
                     return Ok(new PosDtos.ApiResult<PosDtos.PosAssignLabelsResponse>(false, "A staff member is required for each label", null));
 
-                // valid staff ids (active, not deleted)
-                var staffIds = pairs.Values.Distinct().ToList();
-                var validStaff = SqlMapper.Query(conn,
-                    "SELECT Id FROM dbo.STAFF WHERE Deleted = 0 AND Id IN @Ids",
-                    new { Ids = staffIds })
-                    .Select(r => (int)r.Id).ToHashSet();
-
-                int userId = ResolveCurrentUserId();
+                // AssignedBy is the logged-in user when present; NULL for the
+                // anonymous phone-camera flow (the column is nullable).
+                int currentUserId = ResolveCurrentUserId();
+                int? assignedBy = currentUserId > 0 ? currentUserId : (int?)null;
                 int assigned = 0, skipped = 0;
 
                 using (var uow = new UnitOfWork(conn))
                 {
-                    foreach (var kv in pairs)
+                    foreach (var kv in items)
                     {
-                        int labelId = kv.Key, staffId = kv.Value;
-                        if (!validStaff.Contains(staffId)) { skipped++; continue; }
+                        int labelId = kv.Key;
+                        var item = kv.Value;
 
                         var lbl = SqlMapper.Query(uow.Connection, @"
-                            SELECT Id, AppointmentId, InvoiceLineId, ISNULL(IsAssigned,0) AS IsAssigned
+                            SELECT Id, AppointmentId, InvoiceLineId, BranchId, ISNULL(IsAssigned,0) AS IsAssigned
                             FROM dbo.PosServiceLabels WHERE Id = @Id",
                             new { Id = labelId }).FirstOrDefault();
 
                         if (lbl == null || Convert.ToBoolean(lbl.IsAssigned)) { skipped++; continue; }
+
+                        int branchId = (lbl.BranchId == null || lbl.BranchId is DBNull) ? 0 : (int)lbl.BranchId;
+
+                        // Resolve the staff: an explicit StaffId wins; otherwise resolve
+                        // a typed EmployeeCode within the label's branch (anonymous flow).
+                        int staffId = item.StaffId;
+                        if (staffId <= 0 && !string.IsNullOrWhiteSpace(item.StaffCode))
+                        {
+                            staffId = SqlMapper.Query<int?>(uow.Connection, @"
+                                SELECT TOP 1 Id FROM dbo.STAFF
+                                WHERE Deleted = 0 AND Active = 1
+                                  AND EmployeeCode = @Code
+                                  AND (BranchId = @BranchId OR BranchId IS NULL)
+                                ORDER BY CASE WHEN BranchId = @BranchId THEN 0 ELSE 1 END",
+                                new { Code = item.StaffCode.Trim(), BranchId = branchId }).FirstOrDefault() ?? 0;
+                        }
+
+                        if (staffId <= 0) { skipped++; continue; }
+
+                        // staff must be active / not deleted (covers the explicit-StaffId path too)
+                        bool staffOk = SqlMapper.Query<int>(uow.Connection,
+                            "SELECT COUNT(1) FROM dbo.STAFF WHERE Deleted = 0 AND Id = @Id",
+                            new { Id = staffId }).FirstOrDefault() > 0;
+                        if (!staffOk) { skipped++; continue; }
 
                         // 1) the appointment row that represents this service line
                         SqlMapper.Execute(uow.Connection,
@@ -1348,7 +1383,7 @@ namespace PosDashboard.Web.Modules.System
                             SET IsAssigned = 1, AssignedStaffId = @StaffId,
                                 AssignedAt = SYSUTCDATETIME(), AssignedBy = @UserId
                             WHERE Id = @Id",
-                            new { StaffId = staffId, UserId = userId, Id = labelId });
+                            new { StaffId = staffId, UserId = assignedBy, Id = labelId });
 
                         assigned++;
                     }
@@ -1356,7 +1391,7 @@ namespace PosDashboard.Web.Modules.System
                     uow.Commit();
                 }
 
-                var ids = pairs.Keys.ToList();
+                var ids = items.Keys.ToList();
                 var resulting = ids.Count > 0
                     ? QueryLabels(conn, "l.Id IN @Ids", new { Ids = ids })
                     : new List<PosDtos.PosLabelDto>();

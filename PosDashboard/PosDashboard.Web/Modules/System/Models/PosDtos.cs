@@ -208,9 +208,12 @@ namespace PosDashboard.Web.Modules.System.Models
 
         // ---- Phase 2: assign a staff member to one or more service labels ----
         // Each item pairs a label with the staff it should go to (per-label staff).
+        // StaffCode is an alternative to StaffId for the anonymous phone-camera flow:
+        // when StaffId is 0/omitted, the server resolves the code within the label's branch.
         public record PosAssignLabelItem(
             int LabelId,
-            int StaffId
+            int StaffId,
+            string? StaffCode = null
         );
 
         public record PosAssignLabelsRequest(
