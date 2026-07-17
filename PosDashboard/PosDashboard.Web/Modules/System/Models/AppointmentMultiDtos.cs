@@ -24,14 +24,19 @@ namespace PosDashboard.Web.Modules.System.Models
 
         // ===== Request =====
 
-        /// <summary>One service in the booking, with its chosen staff. No time —
-        /// the backend assigns each line its own slot.</summary>
+        /// <summary>One service in the booking, with its chosen staff.
+        /// StartTime is optional: when provided the backend places the line at
+        /// exactly that time (overlaps for the same staff are allowed on purpose);
+        /// when null the backend cascades it to the next free slot.
+        /// UnitPriceOverride is a sale-only price for this line; null => real ITEM price.</summary>
         public record AppointmentMultiLineRequest(
             int ItemId,
             int UnitId,
             int StaffId,
             int? DurationMinutes,   // optional override; falls back to ITEM_UNIT_DURATION
-            string? Notes
+            string? Notes,
+            string? StartTime,          // optional "HH:mm"; null => auto next free slot
+            decimal? UnitPriceOverride  // optional sale-only price; null => ITEM_UNIT_PRICE
         );
 
         /// <summary>Optional payment collected NOW (offline at the salon).

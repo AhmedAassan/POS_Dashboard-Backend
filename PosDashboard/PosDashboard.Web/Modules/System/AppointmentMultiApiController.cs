@@ -143,27 +143,52 @@ namespace PosDashboard.Web.Modules.System
 
                     int duration = ResolveDuration(ln.DurationMinutes, (double?)item.ITEM_UNIT_DURATION, slot);
 
+                    // Sale-only price override (mirrors New Sale); null/negative => real price.
+                    decimal linePrice = ln.UnitPriceOverride.HasValue && ln.UnitPriceOverride.Value >= 0m
+                        ? ln.UnitPriceOverride.Value
+                        : (decimal)item.ITEM_UNIT_PRICE;
+
+                    // Optional explicit per-line start time.
+                    TimeSpan? explicitStart = null;
+                    if (!string.IsNullOrWhiteSpace(ln.StartTime))
+                    {
+                        if (!TimeSpan.TryParseExact(ln.StartTime!.Trim(), @"hh\:mm", null, out var lineStart))
+                            return Fail($"Service #{i + 1}: StartTime must be in HH:mm format");
+                        explicitStart = lineStart;
+                    }
+
                     resolved.Add(new ResolvedLine
                     {
                         Index = i,
                         ItemId = (int)item.ITEM_ID,
                         UnitId = (int)item.UNIT_ID,
                         StaffId = ln.StaffId,
-                        UnitPrice = (decimal)item.ITEM_UNIT_PRICE,
+                        UnitPrice = linePrice,
                         DurationMinutes = duration,
-                        Notes = string.IsNullOrWhiteSpace(ln.Notes) ? null : ln.Notes.Trim()
+                        Notes = string.IsNullOrWhiteSpace(ln.Notes) ? null : ln.Notes.Trim(),
+                        ExplicitStart = explicitStart
                     });
                 }
 
-                // -------- Place each line (cascade + conflict skip) --------
+                // -------- Place each line --------
+                // A line with an explicit StartTime is honored exactly (no shift and
+                // no same-staff overlap check — booking two services at the same time
+                // for one staff is intentional). Lines without a time cascade to the
+                // next free slot as before.
                 var warnings = new List<MultiDtos.AppointmentMultiLineWarning>();
                 var cursor = startTs;
                 foreach (var rl in resolved)
                 {
-                    var availableStart = FindNextAvailableStartForLine(
-                        conn, rl.StaffId, apptDate, cursor, rl.DurationMinutes);
-                    rl.StartTime = availableStart;
-                    rl.EndTime = availableStart + TimeSpan.FromMinutes(rl.DurationMinutes);
+                    if (rl.ExplicitStart.HasValue)
+                    {
+                        rl.StartTime = rl.ExplicitStart.Value;
+                    }
+                    else
+                    {
+                        rl.StartTime = FindNextAvailableStartForLine(
+                            conn, rl.StaffId, apptDate, cursor, rl.DurationMinutes);
+                    }
+                    rl.EndTime = rl.StartTime + TimeSpan.FromMinutes(rl.DurationMinutes);
 
                     if (rl.EndTime >= TimeSpan.FromDays(1))
                         return Fail($"Service #{rl.Index + 1}: no slot available before midnight for this staff.");
@@ -173,14 +198,6 @@ namespace PosDashboard.Web.Modules.System
 
                     cursor = rl.EndTime;
                 }
-
-                // same-staff overlap guard within this booking
-                for (int i = 0; i < resolved.Count; i++)
-                    for (int j = i + 1; j < resolved.Count; j++)
-                        if (resolved[i].StaffId == resolved[j].StaffId &&
-                            resolved[i].StartTime < resolved[j].EndTime &&
-                            resolved[i].EndTime > resolved[j].StartTime)
-                            return Fail($"Services #{i + 1} and #{j + 1} overlap for the same staff. Assign different staff.");
 
                 decimal grandTotal = resolved.Sum(r => r.UnitPrice);
 
@@ -459,6 +476,7 @@ namespace PosDashboard.Web.Modules.System
             public decimal UnitPrice { get; set; }
             public int DurationMinutes { get; set; }
             public string? Notes { get; set; }
+            public TimeSpan? ExplicitStart { get; set; }
             public TimeSpan StartTime { get; set; }
             public TimeSpan EndTime { get; set; }
             public decimal PaidAmount { get; set; }

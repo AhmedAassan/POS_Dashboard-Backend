@@ -24,7 +24,8 @@ namespace PosDashboard.Web.Modules.System.Models
             string ServiceType,     // "SALON" or "HOME"
             bool IsOnlineBooking,
             string? Notes,
-            int? CustomerPackageSessionId // ←  (optional; when set, price is zeroed)
+            int? CustomerPackageSessionId, // ←  (optional; when set, price is zeroed)
+            decimal? UnitPriceOverride = null // ← (optional; sale-only price, mirrors New Sale)
         );
 
         // ===== Update =====

@@ -1055,6 +1055,13 @@ namespace PosDashboard.Web.Modules.System
                 string currency = (string?)head.Currency ?? "KWD";
                 string currencyAr = (string?)head.CurrencyAr ?? currency;
 
+                // Branch timezone offset (hours) so the invoice shows branch-local time,
+                // matching the dashboard/Transactions (CreatedAt is stored in UTC).
+                int tzOffset = SqlMapper.Query<string>(conn,
+                    @"SELECT SETTING_VALUE FROM dbo.SYSTEM_SETTING WHERE SETTING_KEY = 'timeZoneOffset'")
+                    .Select(v => int.TryParse(v, out var n) ? n : 3)
+                    .DefaultIfEmpty(3).First();
+
                 var lines = SqlMapper.Query(conn, @"
                     SELECT
                         ail.Id            AS Id,
@@ -1204,7 +1211,8 @@ namespace PosDashboard.Web.Modules.System
                     SubTotal: (decimal)head.SubTotal,
                     DiscountType: (string?)head.DiscountType,
                     DiscountValue: (decimal?)head.DiscountValue,
-                    DiscountAmount: (decimal)head.DiscountAmount);
+                    DiscountAmount: (decimal)head.DiscountAmount,
+                    TzOffset: tzOffset);
 
                 return Ok(new PosDtos.ApiResult<PosDtos.PosReceiptDto>(true, null, dto));
             }

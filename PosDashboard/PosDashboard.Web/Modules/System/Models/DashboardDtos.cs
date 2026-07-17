@@ -48,6 +48,7 @@ namespace PosDashboard.Web.Modules.System.Models
             // Meta
             string Currency,
             int WorkdayMinutes,
+            int TzOffset,
             DateTime GeneratedAt
         );
 

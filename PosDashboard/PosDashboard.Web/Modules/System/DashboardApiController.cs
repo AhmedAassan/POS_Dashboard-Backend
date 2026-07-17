@@ -1099,6 +1099,7 @@ namespace PosDashboard.Web.Modules.System
                     RefundSummary: refundSummary,
                     Currency: currency,
                     WorkdayMinutes: workdayMinutes,
+                    TzOffset: tzOffset,
                     GeneratedAt: DateTime.UtcNow
                 );
 

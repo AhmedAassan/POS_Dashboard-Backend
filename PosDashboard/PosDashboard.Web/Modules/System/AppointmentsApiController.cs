@@ -130,6 +130,10 @@ namespace PosDashboard.Web.Modules.System
 
             // Calculate pricing
             decimal unitPrice = (decimal)item.ITEM_UNIT_PRICE;
+            // Sale-only price override (mirrors New Sale); ignored for package sessions
+            // (those are zeroed below). Null/negative => keep the real item price.
+            if (request.UnitPriceOverride.HasValue && request.UnitPriceOverride.Value >= 0m)
+                unitPrice = request.UnitPriceOverride.Value;
             decimal discountPercent = 0;
             decimal discountedUnitPrice = unitPrice;
             // NumberOfPersons does NOT affect price

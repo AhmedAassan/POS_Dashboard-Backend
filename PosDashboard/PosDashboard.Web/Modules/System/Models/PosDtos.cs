@@ -311,7 +311,8 @@ namespace PosDashboard.Web.Modules.System.Models
             decimal SubTotal = 0m,         // services + offers BEFORE the ticket discount
             string? DiscountType = null,   // "percentage" | "fixed" | null (no discount)
             decimal? DiscountValue = null, // the raw entered value (10 => 10% / 5.000 => fixed)
-            decimal DiscountAmount = 0m    // money deducted by the ticket discount (0 = none)
+            decimal DiscountAmount = 0m,   // money deducted by the ticket discount (0 = none)
+            int TzOffset = 0               // branch timezone offset (hours); CreatedAt is UTC
         );
     }
 }
