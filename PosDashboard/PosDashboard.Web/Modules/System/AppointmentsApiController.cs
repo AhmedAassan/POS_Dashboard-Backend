@@ -10,6 +10,7 @@ using System.Collections.Generic;
 using System.Data;
 using System.Linq;
 using static PosDashboard.Web.Modules.System.Models.AppointmentDtos;
+using DeliveryDtos = PosDashboard.Web.Modules.System.Models.DeliveryDtos;
 
 namespace PosDashboard.Web.Modules.System
 {
@@ -1273,6 +1274,7 @@ namespace PosDashboard.Web.Modules.System
                 inv.PackageOfferName, inv.PackageOfferPrice,
                 ISNULL(inv.SubTotal, inv.TotalAmount) AS SubTotal,
                 inv.DiscountType, inv.DiscountValue, ISNULL(inv.DiscountAmount, 0) AS DiscountAmount,
+                ISNULL(inv.DeliveryCharge, 0) AS DeliveryCharge,
                 ISNULL(inv.IsFullyRefunded, 0)     AS IsFullyRefunded,
                 ISNULL(inv.IsPartiallyRefunded, 0) AS IsPartiallyRefunded
             FROM dbo.AppointmentInvoices inv
@@ -1293,6 +1295,7 @@ namespace PosDashboard.Web.Modules.System
                     inv.PackageOfferName, inv.PackageOfferPrice,
                     ISNULL(inv.SubTotal, inv.TotalAmount) AS SubTotal,
                     inv.DiscountType, inv.DiscountValue, ISNULL(inv.DiscountAmount, 0) AS DiscountAmount,
+                    ISNULL(inv.DeliveryCharge, 0) AS DeliveryCharge,
                     ISNULL(inv.IsFullyRefunded, 0)     AS IsFullyRefunded,
                     ISNULL(inv.IsPartiallyRefunded, 0) AS IsPartiallyRefunded
                 FROM dbo.AppointmentInvoiceLines ail
@@ -1587,6 +1590,12 @@ namespace PosDashboard.Web.Modules.System
             }
             catch { /* table may not exist yet — ignore */ }
 
+            // Delivery snapshot (frozen at sale). Wrapped defensively so environments
+            // without the InvoiceDelivery table simply show no delivery block.
+            DeliveryDtos.InvoiceDeliveryDto? deliveryDto = null;
+            try { deliveryDto = DeliveryApiController.LoadInvoiceDelivery(conn, invoiceId); }
+            catch { /* table may not exist yet — ignore */ }
+
             var dto = new DetailedInvoiceDto(
                 Id: invoiceId,
                 InvoiceNumber: (string)invoice.InvoiceNumber,
@@ -1616,7 +1625,10 @@ namespace PosDashboard.Web.Modules.System
                 DiscountValue: invoice.DiscountValue is DBNull || invoice.DiscountValue == null
                     ? (decimal?)null : (decimal?)invoice.DiscountValue,
                 DiscountAmount: invoice.DiscountAmount is DBNull || invoice.DiscountAmount == null
-                    ? 0m : (decimal)invoice.DiscountAmount
+                    ? 0m : (decimal)invoice.DiscountAmount,
+                DeliveryCharge: invoice.DeliveryCharge is DBNull || invoice.DeliveryCharge == null
+                    ? 0m : (decimal)invoice.DeliveryCharge,
+                Delivery: deliveryDto
             );
 
             return Ok(new ApiResult<DetailedInvoiceDto>(true, null, dto));

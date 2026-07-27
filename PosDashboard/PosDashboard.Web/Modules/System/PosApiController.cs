@@ -17,6 +17,12 @@
 //   AppointmentInvoiceLines / AppointmentPayments / SubscriptionsHistory)
 //   mirrors the proven New Sale flow so reports, refunds, PDF and the existing
 //   invoice dialog all keep working unchanged.
+// • DELIVERY: gated by the BusinessSetting 'delivery.enabled'. When on, the
+//   ticket may carry a PosDeliveryRequest (type + address + optional date).
+//   The fee is ALWAYS recomputed server-side from AreaDeliveryCharge and is
+//   added AFTER the ticket discount — delivery is never discountable. The
+//   decision is frozen into dbo.InvoiceDelivery so a later edit to the address
+//   or to the price list never rewrites an already-printed invoice.
 
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
@@ -36,6 +42,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using PosDtos = PosDashboard.Web.Modules.System.Models.PosDtos;
+using DeliveryDtos = PosDashboard.Web.Modules.System.Models.DeliveryDtos;
 
 namespace PosDashboard.Web.Modules.System
 {
@@ -300,13 +307,33 @@ namespace PosDashboard.Web.Modules.System
                     })
                     .ToList();
 
+                // -------- Delivery config (flag-gated) --------
+                // Always sent, even when off, so the client has one authoritative
+                // answer to "does this POS show the Delivery step?".
+                var deliverySettings = BusinessSettingsService.GetDeliverySettings(conn, resolvedBranchId);
+                var deliveryTypes = deliverySettings.Enabled
+                    ? DeliveryApiController.LoadDeliveryTypes(conn, resolvedBranchId, includeInactive: false)
+                    : new List<DeliveryDtos.DeliveryTypeDto>();
+
+                var deliveryConfig = new PosDtos.PosDeliveryConfigDto(
+                    Enabled: deliverySettings.Enabled && deliveryTypes.Count > 0,
+                    DateEnabled: deliverySettings.DateEnabled,
+                    DateDefaultOn: deliverySettings.DateDefaultOn,
+                    DefaultLeadDays: deliverySettings.DefaultLeadDays,
+                    Types: deliveryTypes,
+                    DefaultDeliveryTypeId: (deliveryTypes.FirstOrDefault(t => t.IsDelivery && t.IsDefault)
+                                            ?? deliveryTypes.FirstOrDefault(t => t.IsDelivery))?.Id,
+                    DefaultPickupTypeId: (deliveryTypes.FirstOrDefault(t => !t.IsDelivery && t.IsDefault)
+                                          ?? deliveryTypes.FirstOrDefault(t => !t.IsDelivery))?.Id);
+
                 var dto = new PosDtos.PosCatalogDto(
                     Branch: branchDto,
                     Categories: categories,
                     Services: services,
                     Staff: staff,
                     PaymentTypes: paymentTypes,
-                    Offers: offers);
+                    Offers: offers,
+                    Delivery: deliveryConfig);
 
                 return Ok(new PosDtos.ApiResult<PosDtos.PosCatalogDto>(true, null, dto));
             }
@@ -603,7 +630,33 @@ namespace PosDashboard.Web.Modules.System
                     DistributeDiscount(serviceLines, discountAmount, discountDigits);
 
                 decimal subTotal = resolved.Sum(x => x.OriginalUnitPrice);   // services + offers, pre-discount
-                decimal grandTotal = resolved.Sum(x => x.SalePrice);         // after discount
+                decimal itemsTotal = resolved.Sum(x => x.SalePrice);         // after discount
+
+                // -------- Delivery (flag-gated, never discountable) --------
+                // The fee sits OUTSIDE the discount engine on purpose: a 20%-off ticket
+                // must not shave 20% off the courier's cost. It is resolved from
+                // AreaDeliveryCharge (or the type's ChargeOverride) — the client's
+                // number is never trusted.
+                var deliverySettings = BusinessSettingsService.GetDeliverySettings(conn, request.BranchId);
+                decimal deliveryCharge = 0m;
+                ResolvedDelivery? delivery = null;
+
+                if (request.Delivery != null)
+                {
+                    if (!deliverySettings.Enabled)
+                        return FailCheckout("Delivery is disabled for this branch");
+
+                    var (resolvedDelivery, deliveryError) = ResolveDelivery(
+                        conn, request.Delivery, request.BranchId,
+                        (Guid)customer.RefGuide, deliverySettings, tzOffset);
+
+                    if (deliveryError != null) return FailCheckout(deliveryError);
+
+                    delivery = resolvedDelivery;
+                    deliveryCharge = delivery!.Charge;
+                }
+
+                decimal grandTotal = RoundMoney(itemsTotal + deliveryCharge, discountDigits);
 
                 // -------- Validate payments (POS = pay now in full) --------
                 decimal walletAmount = 0m;
@@ -740,7 +793,8 @@ namespace PosDashboard.Web.Modules.System
                             TotalAmount, PaidAmount, RemainingAmount, Currency,
                             PaymentTypeId, PaymentStatus, CreatedAt,
                             SubTotal, DiscountType, DiscountValue, DiscountAmount,
-                            DiscountCode, DiscountCodeId
+                            DiscountCode, DiscountCodeId,
+                            DeliveryTypeId, DeliveryCharge, DeliveryDate, DeliveryDriverId
                         )
                         OUTPUT INSERTED.Id
                         VALUES (
@@ -748,7 +802,8 @@ namespace PosDashboard.Web.Modules.System
                             @TotalAmount, @PaidAmount, 0, @Currency,
                             @PaymentTypeId, 'FULL', SYSUTCDATETIME(),
                             @SubTotal, @DiscountType, @DiscountValue, @DiscountAmount,
-                            @DiscountCode, @DiscountCodeId
+                            @DiscountCode, @DiscountCodeId,
+                            @DeliveryTypeId, @DeliveryCharge, @DeliveryDate, @DeliveryDriverId
                         )",
                         new
                         {
@@ -765,7 +820,11 @@ namespace PosDashboard.Web.Modules.System
                             DiscountValue = storedDiscountValue,
                             DiscountAmount = discountAmount,
                             DiscountCode = redeemedCode,
-                            DiscountCodeId = redeemedCodeId
+                            DiscountCodeId = redeemedCodeId,
+                            DeliveryTypeId = delivery?.TypeId,
+                            DeliveryCharge = delivery == null ? (decimal?)null : delivery.Charge,
+                            DeliveryDate = delivery?.DeliveryDate,
+                            DeliveryDriverId = delivery?.DriverId
                         }).First();
 
                     // 3) Invoice lines
@@ -865,6 +924,69 @@ namespace PosDashboard.Web.Modules.System
                             IsAssigned: false,
                             AssignedStaffId: null,
                             AssignedStaffName: null));
+                    }
+
+                    // 3c) Delivery snapshot — frozen copy of the decision.
+                    //     Denormalised on purpose (see AppointmentHomeService): editing the
+                    //     address or the price list later must never rewrite this invoice.
+                    if (delivery != null)
+                    {
+                        SqlMapper.Execute(uow.Connection, @"
+                            INSERT INTO dbo.InvoiceDelivery (
+                                InvoiceId, AppointmentId, BranchId, CustomerId,
+                                DeliveryTypeId, DeliveryTypeCode, DeliveryTypeNameEn, DeliveryTypeNameAr, IsDelivery,
+                                DriverId, DriverName, DriverNameAr, DriverPhone,
+                                CustomerAddressId, AreaId, AreaNameEn, AreaNameAr,
+                                GovernorateId, GovernorateNameEn, GovernorateNameAr,
+                                AddressBlock, AddressStreet, AddressAvenue, AddressBuilding,
+                                AddressFlat, AddressFloor, AddressNote, AddressLocation,
+                                DeliveryCharge, HasDeliveryDate, DeliveryDate, Notes, CreatedAt
+                            )
+                            VALUES (
+                                @InvoiceId, @AppointmentId, @BranchId, @CustomerId,
+                                @DeliveryTypeId, @Code, @NameEn, @NameAr, @IsDelivery,
+                                @DriverId, @DriverName, @DriverNameAr, @DriverPhone,
+                                @CustomerAddressId, @AreaId, @AreaNameEn, @AreaNameAr,
+                                @GovernorateId, @GovNameEn, @GovNameAr,
+                                @Block, @Street, @Avenue, @Building,
+                                @Flat, @Floor, @Note, @Location,
+                                @Charge, @HasDate, @DeliveryDate, @Notes, SYSUTCDATETIME()
+                            )",
+                            new
+                            {
+                                InvoiceId = invoiceId,
+                                AppointmentId = leadApptId,
+                                BranchId = request.BranchId,
+                                CustomerId = request.CustomerId,
+                                DeliveryTypeId = delivery.TypeId,
+                                Code = delivery.TypeCode,
+                                NameEn = delivery.TypeNameEn,
+                                NameAr = delivery.TypeNameAr,
+                                IsDelivery = delivery.IsDelivery,
+                                DriverId = delivery.DriverId,
+                                DriverName = delivery.DriverName,
+                                DriverNameAr = delivery.DriverNameAr,
+                                DriverPhone = delivery.DriverPhone,
+                                CustomerAddressId = delivery.CustomerAddressId,
+                                AreaId = delivery.AreaId,
+                                AreaNameEn = delivery.AreaNameEn,
+                                AreaNameAr = delivery.AreaNameAr,
+                                GovernorateId = delivery.GovernorateId,
+                                GovNameEn = delivery.GovernorateNameEn,
+                                GovNameAr = delivery.GovernorateNameAr,
+                                Block = delivery.AddressBlock,
+                                Street = delivery.AddressStreet,
+                                Avenue = delivery.AddressAvenue,
+                                Building = delivery.AddressBuilding,
+                                Flat = delivery.AddressFlat,
+                                Floor = delivery.AddressFloor,
+                                Note = delivery.AddressNote,
+                                Location = delivery.AddressLocation,
+                                Charge = delivery.Charge,
+                                HasDate = delivery.HasDeliveryDate,
+                                DeliveryDate = delivery.DeliveryDate,
+                                Notes = delivery.Notes
+                            });
                     }
 
                     // 4) Wallet payment + ledger
@@ -995,7 +1117,9 @@ namespace PosDashboard.Web.Modules.System
                         SubTotal: subTotal,
                         DiscountAmount: discountAmount,
                         DiscountCode: redeemedCode,
-                        DiscountCodeId: redeemedCodeId);
+                        DiscountCodeId: redeemedCodeId,
+                        DeliveryCharge: deliveryCharge,
+                        Delivery: delivery?.ToDto());
 
                     return Ok(new PosDtos.ApiResult<PosDtos.PosCheckoutResponse>(true, null, response));
                 }
@@ -1190,6 +1314,9 @@ namespace PosDashboard.Web.Modules.System
                         AssignedStaffName: (string?)x.AssignedStaffName))
                     .ToList();
 
+                // -------- Delivery snapshot (null for pickup / pre-delivery invoices) --------
+                var deliveryDto = DeliveryApiController.LoadInvoiceDelivery(conn, invoiceId);
+
                 var dto = new PosDtos.PosReceiptDto(
                     InvoiceId: (int)head.InvoiceId,
                     InvoiceNumber: (string?)head.InvoiceNumber ?? "",
@@ -1212,7 +1339,9 @@ namespace PosDashboard.Web.Modules.System
                     DiscountType: (string?)head.DiscountType,
                     DiscountValue: (decimal?)head.DiscountValue,
                     DiscountAmount: (decimal)head.DiscountAmount,
-                    TzOffset: tzOffset);
+                    TzOffset: tzOffset,
+                    DeliveryCharge: deliveryDto?.DeliveryCharge ?? 0m,
+                    Delivery: deliveryDto);
 
                 return Ok(new PosDtos.ApiResult<PosDtos.PosReceiptDto>(true, null, dto));
             }
@@ -1760,6 +1889,206 @@ namespace PosDashboard.Web.Modules.System
                 Debug.WriteLine($"[POS PDF] {ex.Message}");
             }
         }
+
+        // =====================================================================
+        // Delivery resolution
+        // =====================================================================
+
+        /// <summary>
+        /// A validated delivery decision. Every string here is a frozen COPY of what
+        /// the lookups said at sale time — nothing is re-read when the receipt prints.
+        /// </summary>
+        private sealed class ResolvedDelivery
+        {
+            public int TypeId { get; set; }
+            public string TypeCode { get; set; } = "";
+            public string TypeNameEn { get; set; } = "";
+            public string TypeNameAr { get; set; } = "";
+            public bool IsDelivery { get; set; }
+
+            public int? DriverId { get; set; }
+            public string? DriverName { get; set; }
+            public string? DriverNameAr { get; set; }
+            public string? DriverPhone { get; set; }
+
+            public int? CustomerAddressId { get; set; }
+            public int? AreaId { get; set; }
+            public string? AreaNameEn { get; set; }
+            public string? AreaNameAr { get; set; }
+            public int? GovernorateId { get; set; }
+            public string? GovernorateNameEn { get; set; }
+            public string? GovernorateNameAr { get; set; }
+            public string? AddressBlock { get; set; }
+            public string? AddressStreet { get; set; }
+            public string? AddressAvenue { get; set; }
+            public string? AddressBuilding { get; set; }
+            public string? AddressFlat { get; set; }
+            public string? AddressFloor { get; set; }
+            public string? AddressNote { get; set; }
+            public string? AddressLocation { get; set; }
+
+            public decimal Charge { get; set; }
+            public bool HasDeliveryDate { get; set; }
+            public DateTime? DeliveryDate { get; set; }
+            public string? Notes { get; set; }
+
+            public DeliveryDtos.InvoiceDeliveryDto ToDto() => new(
+                DeliveryTypeId: TypeId,
+                DeliveryTypeCode: TypeCode,
+                DeliveryTypeNameEn: TypeNameEn,
+                DeliveryTypeNameAr: TypeNameAr,
+                IsDelivery: IsDelivery,
+                DriverId: DriverId,
+                DriverName: DriverName,
+                DriverNameAr: DriverNameAr,
+                DriverPhone: DriverPhone,
+                CustomerAddressId: CustomerAddressId,
+                AreaId: AreaId,
+                AreaNameEn: AreaNameEn,
+                AreaNameAr: AreaNameAr,
+                GovernorateId: GovernorateId,
+                GovernorateNameEn: GovernorateNameEn,
+                GovernorateNameAr: GovernorateNameAr,
+                AddressBlock: AddressBlock,
+                AddressStreet: AddressStreet,
+                AddressAvenue: AddressAvenue,
+                AddressBuilding: AddressBuilding,
+                AddressFlat: AddressFlat,
+                AddressFloor: AddressFloor,
+                AddressNote: AddressNote,
+                AddressLocation: AddressLocation,
+                DeliveryCharge: Charge,
+                HasDeliveryDate: HasDeliveryDate,
+                DeliveryDate: DeliveryDate,
+                Notes: Notes);
+        }
+
+        /// <summary>
+        /// Validate a PosDeliveryRequest and price it. Returns (null, error) on any
+        /// problem so the caller can FailCheckout with a message the cashier can act on.
+        ///
+        /// Rules enforced here:
+        ///   • the type must exist, be active, and be visible to this branch
+        ///   • IsDelivery = 1  → an address is mandatory and must belong to THIS customer
+        ///   • the address's area must be priced (AreaDeliveryCharge) unless the type
+        ///     defines a ChargeOverride — a silent 0 fee is a data bug, not a free ride
+        ///   • IsDelivery = 0  → address is ignored and the fee is always 0
+        ///   • a delivery date is only honoured when the feature is on and the type
+        ///     is a delivery; it may not be in the past (branch-local)
+        /// </summary>
+        private static (ResolvedDelivery? Delivery, string? Error) ResolveDelivery(
+            IDbConnection conn,
+            PosDtos.PosDeliveryRequest request,
+            int branchId,
+            Guid customerRef,
+            DeliveryDtos.DeliverySettingsDto settings,
+            int tzOffset)
+        {
+            var type = DeliveryApiController
+                .LoadDeliveryTypes(conn, branchId, includeInactive: false)
+                .FirstOrDefault(t => t.Id == request.DeliveryTypeId);
+
+            if (type == null)
+                return (null, $"Delivery type #{request.DeliveryTypeId} not found or not active");
+
+            var d = new ResolvedDelivery
+            {
+                TypeId = type.Id,
+                TypeCode = type.Code,
+                TypeNameEn = type.NameEn,
+                TypeNameAr = type.NameAr,
+                IsDelivery = type.IsDelivery,
+                Notes = string.IsNullOrWhiteSpace(request.Notes) ? null : request.Notes.Trim()
+            };
+
+            if (!type.IsDelivery)
+            {
+                // Pickup: no address, no fee, no date. Anything the client sent is dropped.
+                d.Charge = 0m;
+                d.HasDeliveryDate = false;
+                d.DeliveryDate = null;
+                return (d, null);
+            }
+
+            // ---- Delivery: address is mandatory ----
+            if (request.CustomerAddressId == null || request.CustomerAddressId.Value <= 0)
+                return (null, $"'{type.NameEn}' needs a customer address");
+
+            var addr = DeliveryApiController.ResolveAddress(conn, request.CustomerAddressId.Value);
+            if (addr == null)
+                return (null, "Customer address not found");
+
+            if (addr.CustomerRef != customerRef)
+                return (null, "Selected address does not belong to this customer");
+
+            d.CustomerAddressId = addr.CustomerAddressId;
+            d.AreaId = addr.AreaId;
+            d.AreaNameEn = addr.AreaNameEn;
+            d.AreaNameAr = addr.AreaNameAr;
+            d.GovernorateId = addr.GovernorateId;
+            d.GovernorateNameEn = addr.GovernorateNameEn;
+            d.GovernorateNameAr = addr.GovernorateNameAr;
+            d.AddressBlock = addr.BlockNo;
+            d.AddressStreet = addr.Street;
+            d.AddressAvenue = addr.Avenue;
+            d.AddressBuilding = addr.BuildingNo;
+            d.AddressFlat = addr.FlatNo;
+            d.AddressFloor = addr.Floor;
+            d.AddressNote = addr.Note;
+            d.AddressLocation = addr.Location;
+
+            // ---- Driver: required whenever the governorate has an active driver ----
+            // (A governorate with zero drivers is allowed to pass without one.)
+            if (request.DriverId.HasValue && request.DriverId.Value > 0)
+            {
+                var driver = DeliveryApiController.ResolveDriver(
+                    conn, request.DriverId.Value, branchId, addr.GovernorateId);
+                if (driver == null)
+                    return (null, "Selected driver is inactive or does not serve this governorate");
+
+                d.DriverId = driver.DriverId;
+                d.DriverName = driver.DriverName;
+                d.DriverNameAr = driver.DriverNameAr;
+                d.DriverPhone = driver.DriverPhone;
+            }
+            else
+            {
+                var govDrivers = DeliveryApiController.LoadDrivers(conn, branchId, addr.GovernorateId);
+                if (govDrivers.Count > 0)
+                    return (null, "A driver is required for delivery to this governorate");
+            }
+
+            // ---- Price it ----
+            if (type.ChargeOverride.HasValue)
+            {
+                d.Charge = Math.Max(0m, type.ChargeOverride.Value);
+            }
+            else
+            {
+                // An area with no price row simply means "no delivery fee" (0). That is a
+                // legitimate business case, so we never block the sale on it.
+                var (charge, _) = DeliveryApiController.ResolveAreaCharge(conn, addr.AreaId, branchId);
+                d.Charge = Math.Max(0m, charge);
+            }
+
+            // ---- Optional delivery date + time ----
+            if (settings.DateEnabled && request.UseDeliveryDate && request.DeliveryDate.HasValue)
+            {
+                var branchNow = DateTime.UtcNow.AddHours(tzOffset);
+                // Same-day is fine (a later hour today); yesterday is not.
+                if (request.DeliveryDate.Value.Date < branchNow.Date)
+                    return (null, "Delivery date cannot be in the past");
+
+                d.HasDeliveryDate = true;
+                d.DeliveryDate = request.DeliveryDate.Value;
+            }
+
+            return (d, null);
+        }
+
+        /// <summary>Round to the money precision the POS UI works in (keeps the fully-paid check honest).</summary>
+        private static decimal RoundMoney(decimal value, int digits) =>
+            Math.Round(value, digits, MidpointRounding.AwayFromZero);
 
         // ===== Internal model =====
         private sealed class ResolvedLine

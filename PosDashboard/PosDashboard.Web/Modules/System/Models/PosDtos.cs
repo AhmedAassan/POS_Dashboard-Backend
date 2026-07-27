@@ -106,13 +106,28 @@ namespace PosDashboard.Web.Modules.System.Models
             List<PosOfferItemDto> Items
         );
 
+        // ---- Delivery (see DeliveryDtos / DeliveryApiController) ----
+        // Bootstrapped with the catalog so the POS knows on load whether the
+        // Delivery step exists at all. When Enabled = false the whole flow is
+        // invisible: no dialog, no charge, no delivery row on the invoice.
+        public record PosDeliveryConfigDto(
+            bool Enabled,
+            bool DateEnabled,          // may the cashier attach a delivery date?
+            bool DateDefaultOn,        // does that switch start ON?
+            int DefaultLeadDays,       // suggested date = today + this
+            List<DeliveryDtos.DeliveryTypeDto> Types,
+            int? DefaultDeliveryTypeId,
+            int? DefaultPickupTypeId
+        );
+
         public record PosCatalogDto(
             PosBranchDto Branch,
             List<PosCategoryDto> Categories,
             List<PosServiceDto> Services,
             List<PosStaffDto> Staff,
             List<PosPaymentTypeDto> PaymentTypes,
-            List<PosOfferDto> Offers
+            List<PosOfferDto> Offers,
+            PosDeliveryConfigDto? Delivery = null
         );
 
         // =====================================================================
@@ -167,6 +182,24 @@ namespace PosDashboard.Web.Modules.System.Models
             decimal Value       // percent (0..100) OR fixed money amount
         );
 
+        // Delivery decision for this ticket. Omit (or send Enabled=false settings)
+        // and the sale behaves exactly as it did before this feature existed.
+        //
+        // NOTE: the charge is NEVER taken from the client. The server recomputes it
+        // from AreaDeliveryCharge (AreaId of the chosen address + BranchId), or from
+        // DeliveryType.ChargeOverride when that type defines a flat fee.
+        public record PosDeliveryRequest(
+            int DeliveryTypeId,
+            /// <summary>Required when the chosen type has IsDelivery = 1.</summary>
+            int? CustomerAddressId = null,
+            /// <summary>Optional driver. When set, must serve the address's governorate.</summary>
+            int? DriverId = null,
+            /// <summary>Branch-local date + time. Ignored unless UseDeliveryDate is true.</summary>
+            DateTime? DeliveryDate = null,
+            bool UseDeliveryDate = false,
+            string? Notes = null
+        );
+
         public record PosCheckoutRequest(
             int BranchId,
             int CustomerId,
@@ -179,7 +212,10 @@ namespace PosDashboard.Web.Modules.System.Models
                                                                // Customer discount code (CARD-######). When present it OVERRIDES the manual
                                                                // Discount above and is applied to the SERVICES subtotal only (never OFFER
                                                                // packages). The code is validated + redeemed atomically inside checkout.
-            string? DiscountCode = null
+            string? DiscountCode = null,
+            // Delivery / pickup decision for this ticket. Null = the flow is off,
+            // or the POS never showed the step -> a plain counter sale, unchanged.
+            PosDeliveryRequest? Delivery = null
         );
 
         // =====================================================================
@@ -245,7 +281,11 @@ namespace PosDashboard.Web.Modules.System.Models
             decimal SubTotal = 0m,         // services + offers BEFORE the ticket discount
             decimal DiscountAmount = 0m,   // money deducted by the ticket discount (0 = none)
             string? DiscountCode = null,   // the redeemed CARD-###### (null = none)
-            int? DiscountCodeId = null     // its id (null = none)
+            int? DiscountCodeId = null,    // its id (null = none)
+                                           // Delivery: the fee added on top of (SubTotal - Discount), plus the
+                                           // frozen snapshot. Both are null/0 for pickup and for non-delivery sales.
+            decimal DeliveryCharge = 0m,
+            DeliveryDtos.InvoiceDeliveryDto? Delivery = null
         );
 
         // =====================================================================
@@ -312,7 +352,11 @@ namespace PosDashboard.Web.Modules.System.Models
             string? DiscountType = null,   // "percentage" | "fixed" | null (no discount)
             decimal? DiscountValue = null, // the raw entered value (10 => 10% / 5.000 => fixed)
             decimal DiscountAmount = 0m,   // money deducted by the ticket discount (0 = none)
-            int TzOffset = 0               // branch timezone offset (hours); CreatedAt is UTC
+            int TzOffset = 0,              // branch timezone offset (hours); CreatedAt is UTC
+                                           // Delivery fee + snapshot. The invoice renders
+                                           // Subtotal -> Discount -> Delivery -> Total when DeliveryCharge > 0.
+            decimal DeliveryCharge = 0m,
+            DeliveryDtos.InvoiceDeliveryDto? Delivery = null
         );
     }
 }

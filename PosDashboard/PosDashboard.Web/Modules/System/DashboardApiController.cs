@@ -446,12 +446,17 @@ namespace PosDashboard.Web.Modules.System
                         ai.PackageOfferName,
                         ai.PackageOfferPrice,
                         ISNULL(ai.IsFullyRefunded, 0) AS IsFullyRefunded,
-                        ISNULL(ai.IsVoid, 0)          AS IsVoid
+                        ISNULL(ai.IsVoid, 0)          AS IsVoid,
+                        CASE WHEN @Lang = 'ar' THEN dt.NameAr ELSE dt.NameEn END AS DeliveryTypeName,
+                        dt.IsDelivery                 AS IsDelivery,
+                        ai.DeliveryDate               AS DeliveryDate,
+                        ISNULL(ai.DeliveryCharge, 0)  AS DeliveryCharge
                     FROM InvAmounts ia
                     INNER JOIN dbo.AppointmentData a ON a.Id = ia.AppointmentId
                     INNER JOIN dbo.CUSTOMER c        ON c.CUSTOMER_ID = a.CustomerId
                     LEFT  JOIN dbo.STAFF s           ON s.Id = a.StaffId
                     LEFT JOIN dbo.AppointmentInvoices ai ON ai.AppointmentId = ia.AppointmentId
+                    LEFT JOIN dbo.DeliveryType dt    ON dt.Id = ai.DeliveryTypeId
                     WHERE ia.NonDepositNonWalletPaid > 0
 
                     UNION ALL
@@ -472,7 +477,11 @@ namespace PosDashboard.Web.Modules.System
                         CAST(NULL AS NVARCHAR(255))  AS PackageOfferName,
                         CAST(NULL AS DECIMAL(18,3))  AS PackageOfferPrice,
                         CAST(0 AS BIT)              AS IsFullyRefunded,
-                        CAST(0 AS BIT)              AS IsVoid
+                        CAST(0 AS BIT)              AS IsVoid,
+                        CAST(NULL AS NVARCHAR(100))  AS DeliveryTypeName,
+                        CAST(NULL AS BIT)            AS IsDelivery,
+                        CAST(NULL AS DATETIME2(0))   AS DeliveryDate,
+                        CAST(0 AS DECIMAL(18,3))     AS DeliveryCharge
                     FROM dbo.AppointmentPayments ap
                     INNER JOIN dbo.AppointmentData a ON a.Id = ap.AppointmentId
                     INNER JOIN dbo.CUSTOMER c        ON c.CUSTOMER_ID = a.CustomerId
@@ -501,7 +510,11 @@ namespace PosDashboard.Web.Modules.System
                         CAST(NULL AS NVARCHAR(255))  AS PackageOfferName,
                         CAST(NULL AS DECIMAL(18,3))  AS PackageOfferPrice,
                         CAST(0 AS BIT)              AS IsFullyRefunded,
-                        CAST(0 AS BIT)              AS IsVoid
+                        CAST(0 AS BIT)              AS IsVoid,
+                        CAST(NULL AS NVARCHAR(100))  AS DeliveryTypeName,
+                        CAST(NULL AS BIT)            AS IsDelivery,
+                        CAST(NULL AS DATETIME2(0))   AS DeliveryDate,
+                        CAST(0 AS DECIMAL(18,3))     AS DeliveryCharge
                     FROM dbo.SubscriptionPayment sp
                     INNER JOIN dbo.Subscriptions s ON s.Id = sp.SubscriptionId
                     INNER JOIN dbo.CUSTOMER c      ON c.CUSTOMER_REF_GUIDE = s.CustomerRef
@@ -527,7 +540,11 @@ namespace PosDashboard.Web.Modules.System
                         CAST(NULL AS NVARCHAR(255))  AS PackageOfferName,
                         CAST(NULL AS DECIMAL(18,3))  AS PackageOfferPrice,
                         CAST(0 AS BIT)              AS IsFullyRefunded,
-                        CAST(0 AS BIT)              AS IsVoid
+                        CAST(0 AS BIT)              AS IsVoid,
+                        CAST(NULL AS NVARCHAR(100))  AS DeliveryTypeName,
+                        CAST(NULL AS BIT)            AS IsDelivery,
+                        CAST(NULL AS DATETIME2(0))   AS DeliveryDate,
+                        CAST(0 AS DECIMAL(18,3))     AS DeliveryCharge
                     FROM dbo.CustomerPackagePayments pp
                     INNER JOIN dbo.CustomerPackages cp  ON cp.Id = pp.CustomerPackageId
                     INNER JOIN dbo.Packages pkg         ON pkg.Id = cp.PackageId
@@ -556,7 +573,11 @@ namespace PosDashboard.Web.Modules.System
                         CAST(NULL AS NVARCHAR(255))  AS PackageOfferName,
                         CAST(NULL AS DECIMAL(18,3))  AS PackageOfferPrice,
                         CAST(0 AS BIT)              AS IsFullyRefunded,
-                        CAST(0 AS BIT)              AS IsVoid
+                        CAST(0 AS BIT)              AS IsVoid,
+                        CAST(NULL AS NVARCHAR(100))  AS DeliveryTypeName,
+                        CAST(NULL AS BIT)            AS IsDelivery,
+                        CAST(NULL AS DATETIME2(0))   AS DeliveryDate,
+                        CAST(0 AS DECIMAL(18,3))     AS DeliveryCharge
                     FROM dbo.RefundTransactions rt
                     INNER JOIN dbo.AppointmentInvoices ai ON ai.Id = rt.InvoiceId
                     INNER JOIN dbo.CUSTOMER c ON c.CUSTOMER_ID = rt.CustomerId
@@ -575,7 +596,13 @@ namespace PosDashboard.Web.Modules.System
                     PackageOfferName,
                     PackageOfferPrice,
                     IsFullyRefunded,
-                    IsVoid
+                    IsVoid,
+                    DeliveryTypeName,
+                    IsDelivery,
+                    -- DeliveryDate is stored branch-local already (POS writes branch-local);
+                    -- pass through untouched.
+                    DeliveryDate,
+                    DeliveryCharge
                 FROM Tx
                 ORDER BY TxAt DESC;",
                     p)
@@ -627,7 +654,15 @@ namespace PosDashboard.Web.Modules.System
                                 ? (decimal?)null
                                 : (decimal?)Convert.ToDecimal(r.PackageOfferPrice),
                             IsFullyRefunded: r.IsFullyRefunded != null && (bool)r.IsFullyRefunded,
-                            IsVoid: r.IsVoid != null && (bool)r.IsVoid
+                            IsVoid: r.IsVoid != null && (bool)r.IsVoid,
+                            DeliveryTypeName: r.DeliveryTypeName is DBNull || r.DeliveryTypeName == null
+                                ? (string?)null : (string?)r.DeliveryTypeName,
+                            IsDelivery: r.IsDelivery is DBNull || r.IsDelivery == null
+                                ? (bool?)null : (bool?)r.IsDelivery,
+                            DeliveryDate: r.DeliveryDate is DBNull || r.DeliveryDate == null
+                                ? (DateTime?)null : (DateTime?)r.DeliveryDate,
+                            DeliveryCharge: r.DeliveryCharge is DBNull || r.DeliveryCharge == null
+                                ? 0m : Convert.ToDecimal(r.DeliveryCharge)
                         );
                     }).ToList();
 
@@ -677,7 +712,8 @@ namespace PosDashboard.Web.Modules.System
                             ORDER BY ail.Id
                         ), a.DiscountedUnitPrice) AS DiscountedUnitPrice
                     FROM dbo.AppointmentData a
-                    WHERE NOT EXISTS (
+                    WHERE a.CheckoutStatus = 'checked_out'   -- only actually-paid appointments count
+                      AND (NOT EXISTS (
                         -- Exclude appointment if ALL its invoice lines are refunded
                         SELECT 1 FROM dbo.AppointmentInvoiceLines ail2
                         WHERE ail2.AppointmentId = a.Id
@@ -686,7 +722,7 @@ namespace PosDashboard.Web.Modules.System
                         SELECT 1 FROM dbo.AppointmentInvoiceLines ail3
                         WHERE ail3.AppointmentId = a.Id
                           AND ISNULL(ail3.IsRefunded, 0) = 0
-                    )
+                    ))
 
                     UNION ALL
 
@@ -768,14 +804,15 @@ namespace PosDashboard.Web.Modules.System
                         ), iu.ITEM_UNIT_PRICE)
                         ELSE a.DiscountedUnitPrice
                     END AS Amount,
-                    CONVERT(varchar(5), a.StartTime, 108)   AS [Time]
+                    CONVERT(varchar(5), a.StartTime, 108)   AS [Time],
+                    ai.InvoiceNumber                        AS InvoiceNumber
                 FROM dbo.AppointmentData a
                 INNER JOIN dbo.CUSTOMER c ON c.CUSTOMER_ID = a.CustomerId
                 INNER JOIN dbo.ITEM     i ON i.ITEM_ID     = a.ItemId
                 INNER JOIN dbo.ITEM_UNIT iu ON iu.ITEM_ID = a.ItemId AND iu.UNIT_ID = a.UnitId
                 -- ربط الـ invoice للـ OFFER
                 OUTER APPLY (
-                    SELECT TOP 1 inv.PackageOfferId, inv.PackageOfferPrice
+                    SELECT TOP 1 inv.PackageOfferId, inv.PackageOfferPrice, inv.InvoiceNumber
                     FROM dbo.AppointmentInvoices inv
                     WHERE inv.AppointmentId = a.Id
                        OR inv.Id IN (
@@ -804,6 +841,7 @@ namespace PosDashboard.Web.Modules.System
                 WHERE a.BranchId        = @BranchId
                   AND a.AppointmentDate  BETWEEN @FromDateOnly AND @ToDateOnly
                   AND a.StaffId IS NOT NULL          -- un-staffed POS sales have no staff to attribute to
+                  AND a.CheckoutStatus = 'checked_out'   -- only actually-paid appointments count
                   AND (@StaffId IS NULL OR a.StaffId = @StaffId)
                   -- Exclude appointment if it has invoice lines and ALL of them are refunded
                   AND (
@@ -826,7 +864,11 @@ namespace PosDashboard.Web.Modules.System
                     c.CUSTOMER_NAME                         AS CustomerName,
                     CASE WHEN @Lang = 'ar' THEN i.ITEM_NAME2 ELSE i.ITEM_NAME1 END                            AS ServiceName,
                     aci.DiscountedUnitPrice                 AS Amount,
-                    NULL                                    AS [Time]
+                    NULL                                    AS [Time],
+                    (SELECT TOP 1 inv_ci.InvoiceNumber
+                     FROM dbo.AppointmentInvoices inv_ci
+                     WHERE inv_ci.AppointmentId = a.Id
+                     ORDER BY inv_ci.Id DESC)               AS InvoiceNumber
                 FROM dbo.AppointmentCheckoutItems aci
                 INNER JOIN dbo.AppointmentData a ON a.Id  = aci.AppointmentId
                 INNER JOIN dbo.CUSTOMER        c ON c.CUSTOMER_ID = aci.CustomerId
@@ -849,7 +891,8 @@ namespace PosDashboard.Web.Modules.System
                         THEN cps.ItemPriceInPackage
                         ELSE iu.ITEM_UNIT_PRICE
                     END AS Amount,
-                    NULL                                    AS [Time]
+                    NULL                                    AS [Time],
+                    CAST(NULL AS NVARCHAR(50))              AS InvoiceNumber
                 FROM dbo.CustomerPackageSessions cps
                 INNER JOIN dbo.CustomerPackages  cp  ON cp.Id               = cps.CustomerPackageId
                 INNER JOIN dbo.CUSTOMER          c   ON c.CUSTOMER_REF_GUIDE = cp.CustomerRef
@@ -876,7 +919,9 @@ namespace PosDashboard.Web.Modules.System
                             CustomerName: (string)(r.CustomerName ?? ""),
                             ServiceName: (string)(r.ServiceName ?? ""),
                             Amount: (decimal)r.Amount,
-                            Time: (string)(r.Time ?? "00:00")
+                            Time: (string)(r.Time ?? "00:00"),
+                            InvoiceNumber: r.InvoiceNumber is DBNull || r.InvoiceNumber == null
+                                ? (string?)null : (string?)r.InvoiceNumber
                         )).ToList()
                     );
 

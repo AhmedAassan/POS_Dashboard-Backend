@@ -81,7 +81,15 @@ namespace PosDashboard.Web.Modules.System.Models
             /// <summary>True when all invoice lines have been refunded</summary>
             bool IsFullyRefunded,
             /// <summary>True when the invoice was voided (cancelled without refund)</summary>
-            bool IsVoid
+            bool IsVoid,
+            // ── Delivery (CHECKOUT rows only; null everywhere else) ──
+            /// <summary>Localised delivery type name ("Delivery" / "Pickup"), null for non-POS rows.</summary>
+            string? DeliveryTypeName = null,
+            /// <summary>True = delivery, false = pickup, null = not a delivery-aware sale.</summary>
+            bool? IsDelivery = null,
+            /// <summary>Branch-local delivery date+time (UTC in DB → converted client-side), null if none.</summary>
+            DateTime? DeliveryDate = null,
+            decimal DeliveryCharge = 0m
         );
 
         public record StaffPerformanceDto(
@@ -102,7 +110,8 @@ namespace PosDashboard.Web.Modules.System.Models
             string CustomerName,
             string ServiceName,
             decimal Amount,
-            string Time
+            string Time,
+            string? InvoiceNumber = null
         );
 
         public record AppointmentStatsDto(

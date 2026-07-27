@@ -293,7 +293,11 @@ namespace PosDashboard.Web.Modules.System.Models
             decimal SubTotal = 0m,
             string? DiscountType = null,
             decimal? DiscountValue = null,
-            decimal DiscountAmount = 0m
+            decimal DiscountAmount = 0m,
+            // Delivery (POS). DeliveryCharge = 0 and Delivery = null for non-delivery
+            // invoices and for anything created before the delivery flow existed.
+            decimal DeliveryCharge = 0m,
+            PosDashboard.Web.Modules.System.Models.DeliveryDtos.InvoiceDeliveryDto? Delivery = null
         );
 
         /*split payment history*/
