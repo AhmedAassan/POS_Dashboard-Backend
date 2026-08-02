@@ -215,7 +215,13 @@ namespace PosDashboard.Web.Modules.System.Models
             string? DiscountCode = null,
             // Delivery / pickup decision for this ticket. Null = the flow is off,
             // or the POS never showed the step -> a plain counter sale, unchanged.
-            PosDeliveryRequest? Delivery = null
+            PosDeliveryRequest? Delivery = null,
+            // DEFERRED PAYMENT (debt). True = save the ticket WITHOUT collecting.
+            // The invoice is created with PaidAmount = 0, RemainingAmount = Total,
+            // PaymentStatus = 'NONE' and IsDeferred = 1, and is collected later from
+            // /orders or from the POS client block. Requires the 'debt.enabled' flag;
+            // Payments must be empty. Everything else about the sale is unchanged.
+            bool Deferred = false
         );
 
         // =====================================================================
@@ -285,7 +291,9 @@ namespace PosDashboard.Web.Modules.System.Models
                                            // Delivery: the fee added on top of (SubTotal - Discount), plus the
                                            // frozen snapshot. Both are null/0 for pickup and for non-delivery sales.
             decimal DeliveryCharge = 0m,
-            DeliveryDtos.InvoiceDeliveryDto? Delivery = null
+            DeliveryDtos.InvoiceDeliveryDto? Delivery = null,
+            // Deferred (debt) sale: nothing was collected at the counter.
+            bool IsDeferred = false
         );
 
         // =====================================================================
@@ -356,7 +364,19 @@ namespace PosDashboard.Web.Modules.System.Models
                                            // Delivery fee + snapshot. The invoice renders
                                            // Subtotal -> Discount -> Delivery -> Total when DeliveryCharge > 0.
             decimal DeliveryCharge = 0m,
-            DeliveryDtos.InvoiceDeliveryDto? Delivery = null
+            DeliveryDtos.InvoiceDeliveryDto? Delivery = null,
+            // ---- Deferred payment (debt) ----
+            // IsDeferred marks a ticket that was saved unpaid. SettledAt is the
+            // collection date (تاريخ التحصيل) the invoice dialog prints next to
+            // "Paid via"; it stays null while the debt is still open.
+            bool IsDeferred = false,
+            DateTime? SettledAt = null,
+            string? DebtDiscountType = null,
+            decimal? DebtDiscountValue = null,
+            decimal DebtDiscountAmount = 0m,
+            // Open debt for THIS customer at the moment the receipt was read —
+            // lets the receipt show "still owes X" without a second round trip.
+            decimal CustomerOpenDebt = 0m
         );
     }
 }

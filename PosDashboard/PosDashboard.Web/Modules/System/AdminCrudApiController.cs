@@ -1398,7 +1398,9 @@ namespace PosDashboard.Web.Modules.System
             [FromQuery] int pageSize = 20,
             [FromQuery] string? search = null,
             [FromQuery] int? branchId = null,
-            [FromQuery] int? isBlock = null)
+            [FromQuery] int? isBlock = null,
+            /// <summary>true = only customers who currently owe money (المديونيات).</summary>
+            [FromQuery] bool? hasDebt = null)
         {
             using var conn = sqlConnections.NewByKey("Default");
 
@@ -1419,18 +1421,45 @@ namespace PosDashboard.Web.Modules.System
                     ISNULL(c.UnpaidSales,0)       AS UnpaidSales,
                     ISNULL(c.HasRefundHistory,0)  AS HasRefundHistory,
                     ISNULL(c.NotificationLang,'ar') AS NotificationLang,
-                    c.CUSTOMER_CREATED_DATE AS CustomerCreatedDate
+                    c.CUSTOMER_CREATED_DATE AS CustomerCreatedDate,
+                    -- Deferred payment (debt): open balance + when it was last collected.
+                    ISNULL(d.TotalDebt, 0)    AS TotalDebt,
+                    ISNULL(d.DebtInvoices, 0) AS DebtInvoiceCount,
+                    p.LastPaymentAt           AS LastPaymentAt
                 FROM dbo.CUSTOMER c
                 LEFT JOIN dbo.BRANCH b ON b.BRANCH_ID = c.BRANCH_ID
+                OUTER APPLY (
+                    SELECT SUM(inv.RemainingAmount) AS TotalDebt, COUNT(*) AS DebtInvoices
+                    FROM dbo.AppointmentInvoices inv
+                    WHERE inv.CustomerId = c.CUSTOMER_ID
+                      AND inv.IsDeferred = 1
+                      AND inv.SettledAt IS NULL
+                      AND inv.RemainingAmount > 0
+                ) d
+                OUTER APPLY (
+                    SELECT MAX(s.SettledAt) AS LastPaymentAt
+                    FROM dbo.DebtSettlements s
+                    WHERE s.CustomerId = c.CUSTOMER_ID AND s.Deleted = 0
+                ) p
                 WHERE 1=1
                   AND (@BranchId IS NULL OR c.BRANCH_ID = @BranchId)
                   AND (@IsBlock IS NULL OR c.CUSTOMER_IS_BLOCK = @IsBlock)
+                  AND (@HasDebt IS NULL
+                       OR (@HasDebt = 1 AND ISNULL(d.TotalDebt, 0) > 0)
+                       OR (@HasDebt = 0 AND ISNULL(d.TotalDebt, 0) = 0))
                   AND (@Search IS NULL OR
                        c.CUSTOMER_NAME   LIKE '%' + @Search + '%' OR
                        c.CUSTOMER_PHONE1 LIKE '%' + @Search + '%' OR
                        c.CUSTOMER_PHONE2 LIKE '%' + @Search + '%')
-                ORDER BY c.CUSTOMER_NAME",
-                new { BranchId = branchId, IsBlock = isBlock, Search = search }).ToList();
+                ORDER BY CASE WHEN @HasDebt = 1 THEN ISNULL(d.TotalDebt, 0) END DESC,
+                         c.CUSTOMER_NAME",
+                new
+                {
+                    BranchId = branchId,
+                    IsBlock = isBlock,
+                    Search = search,
+                    HasDebt = hasDebt == null ? (int?)null : (hasDebt.Value ? 1 : 0)
+                }).ToList();
 
             int total = all.Count;
             var items = all.Skip((page - 1) * pageSize).Take(pageSize).ToList();

@@ -658,7 +658,35 @@ namespace PosDashboard.Web.Modules.System
 
                 decimal grandTotal = RoundMoney(itemsTotal + deliveryCharge, discountDigits);
 
-                // -------- Validate payments (POS = pay now in full) --------
+                // -------- Deferred payment (debt) --------
+                // A deferred ticket is a NORMAL sale that simply hasn't been paid yet:
+                // same lines, same labels, same delivery snapshot, same PDF. Only the
+                // money side differs, so everything below branches on this one flag.
+                bool deferred = request.Deferred;
+                if (deferred)
+                {
+                    var debtSettings = DebtApiController.LoadDebtSettings(conn, request.BranchId);
+                    if (!debtSettings.Enabled)
+                        return FailCheckout("The deferred payment flow is disabled");
+
+                    bool anyPayment =
+                        (request.Payments?.WalletAmount ?? 0m) > 0m ||
+                        (request.Payments?.Splits?.Any(p => p.Amount > 0) ?? false);
+                    if (anyPayment)
+                        return FailCheckout("A deferred sale cannot carry a payment. Save it unpaid, then collect it.");
+
+                    // Optional guard rail: stop a customer whose debt is already too high.
+                    if (debtSettings.CustomerLimit > 0m)
+                    {
+                        decimal openDebt = DebtApiController.GetCustomerOpenDebt(
+                            conn, request.CustomerId, request.BranchId);
+                        if (openDebt + grandTotal > debtSettings.CustomerLimit)
+                            return FailCheckout(
+                                $"Debt limit reached. Open: {openDebt:F3}, this sale: {grandTotal:F3}, limit: {debtSettings.CustomerLimit:F3}");
+                    }
+                }
+
+                // -------- Validate payments (POS = pay now in full, unless deferred) --------
                 decimal walletAmount = 0m;
                 int? walletSubId = null;
                 int? walletPtId = null;
@@ -715,10 +743,17 @@ namespace PosDashboard.Web.Modules.System
                 }
 
                 decimal paidTotal = walletAmount + splitsTotal;
-                if (paidTotal - grandTotal > 0.0001m)
-                    return FailCheckout($"Payment total ({paidTotal:F3}) exceeds sale total ({grandTotal:F3})");
-                if (Math.Abs(paidTotal - grandTotal) > 0.0001m)
-                    return FailCheckout($"POS sale must be fully paid. Total: {grandTotal:F3}, Paid: {paidTotal:F3}");
+                if (!deferred)
+                {
+                    if (paidTotal - grandTotal > 0.0001m)
+                        return FailCheckout($"Payment total ({paidTotal:F3}) exceeds sale total ({grandTotal:F3})");
+                    if (Math.Abs(paidTotal - grandTotal) > 0.0001m)
+                        return FailCheckout($"POS sale must be fully paid. Total: {grandTotal:F3}, Paid: {paidTotal:F3}");
+                }
+
+                // What the invoice header will carry.
+                decimal remainingTotal = deferred ? grandTotal : 0m;
+                string invoicePaymentStatus = deferred ? "NONE" : "FULL";
 
                 int currentUserId = ResolveCurrentUserId();
 
@@ -749,7 +784,7 @@ namespace PosDashboard.Web.Modules.System
                                 @AppointmentDate, @StartTime, @EndTime,
                                 1, 'SALON', 0, @Notes,
                                 @UnitPrice, @DiscountPercent, @DiscountedUnitPrice, @TotalPrice,
-                                @PaidAmount, 'FULL', 0,
+                                @PaidAmount, @PaymentStatus, 0,
                                 'completed', 'checked_out', SYSUTCDATETIME(), @SaleGroupId, 0,
                                 @PackageOfferId, @PackageGroupId
                             )",
@@ -768,7 +803,9 @@ namespace PosDashboard.Web.Modules.System
                                 DiscountPercent = ComputeDiscountPercent(rl.UnitPrice, rl.SalePrice),
                                 DiscountedUnitPrice = rl.SalePrice,
                                 TotalPrice = rl.SalePrice,
-                                PaidAmount = rl.SalePrice,
+                                // Deferred: the service was delivered but nothing was collected.
+                                PaidAmount = deferred ? 0m : rl.SalePrice,
+                                PaymentStatus = invoicePaymentStatus,
                                 SaleGroupId = saleGroupId,
                                 rl.PackageOfferId,
                                 rl.PackageGroupId
@@ -783,7 +820,8 @@ namespace PosDashboard.Web.Modules.System
                     string invoiceNumber = InvoiceNumberService.Next(uow.Connection, InvoiceNumberService.PrefixPos);
 
                     int? invoicePaymentTypeId = (int?)splits.FirstOrDefault()?.PaymentTypeId ?? walletPtId;
-                    if (invoicePaymentTypeId == null)
+                    // A deferred ticket has no payment yet, so it has no payment type.
+                    if (invoicePaymentTypeId == null && !deferred)
                         return FailCheckout("Payment type is required for a fully paid POS sale");
 
                     // 2) Shared invoice
@@ -794,16 +832,18 @@ namespace PosDashboard.Web.Modules.System
                             PaymentTypeId, PaymentStatus, CreatedAt,
                             SubTotal, DiscountType, DiscountValue, DiscountAmount,
                             DiscountCode, DiscountCodeId,
-                            DeliveryTypeId, DeliveryCharge, DeliveryDate, DeliveryDriverId
+                            DeliveryTypeId, DeliveryCharge, DeliveryDate, DeliveryDriverId,
+                            IsDeferred
                         )
                         OUTPUT INSERTED.Id
                         VALUES (
                             @InvoiceNumber, @AppointmentId, @BranchId, @CustomerId,
-                            @TotalAmount, @PaidAmount, 0, @Currency,
-                            @PaymentTypeId, 'FULL', SYSUTCDATETIME(),
+                            @TotalAmount, @PaidAmount, @RemainingAmount, @Currency,
+                            @PaymentTypeId, @PaymentStatus, SYSUTCDATETIME(),
                             @SubTotal, @DiscountType, @DiscountValue, @DiscountAmount,
                             @DiscountCode, @DiscountCodeId,
-                            @DeliveryTypeId, @DeliveryCharge, @DeliveryDate, @DeliveryDriverId
+                            @DeliveryTypeId, @DeliveryCharge, @DeliveryDate, @DeliveryDriverId,
+                            @IsDeferred
                         )",
                         new
                         {
@@ -813,6 +853,9 @@ namespace PosDashboard.Web.Modules.System
                             CustomerId = request.CustomerId,
                             TotalAmount = grandTotal,
                             PaidAmount = paidTotal,
+                            RemainingAmount = remainingTotal,
+                            PaymentStatus = invoicePaymentStatus,
+                            IsDeferred = deferred ? 1 : 0,
                             Currency = currency,
                             PaymentTypeId = invoicePaymentTypeId,
                             SubTotal = subTotal,
@@ -1106,9 +1149,9 @@ namespace PosDashboard.Web.Modules.System
                         AppointmentIds: apptIds,
                         TotalAmount: grandTotal,
                         PaidAmount: paidTotal,
-                        RemainingAmount: 0m,
+                        RemainingAmount: remainingTotal,
                         WalletDeductedAmount: walletAmount,
-                        PaymentStatus: "FULL",
+                        PaymentStatus: invoicePaymentStatus,
                         Currency: currency,
                         WhatsAppSent: waSent,
                         WhatsAppError: waErr,
@@ -1119,7 +1162,8 @@ namespace PosDashboard.Web.Modules.System
                         DiscountCode: redeemedCode,
                         DiscountCodeId: redeemedCodeId,
                         DeliveryCharge: deliveryCharge,
-                        Delivery: delivery?.ToDto());
+                        Delivery: delivery?.ToDto(),
+                        IsDeferred: deferred);
 
                     return Ok(new PosDtos.ApiResult<PosDtos.PosCheckoutResponse>(true, null, response));
                 }
@@ -1162,6 +1206,12 @@ namespace PosDashboard.Web.Modules.System
                         inv.DiscountType    AS DiscountType,
                         inv.DiscountValue   AS DiscountValue,
                         ISNULL(inv.DiscountAmount, 0) AS DiscountAmount,
+                        ISNULL(inv.IsDeferred, 0)     AS IsDeferred,
+                        inv.SettledAt       AS SettledAt,
+                        inv.DebtDiscountType  AS DebtDiscountType,
+                        inv.DebtDiscountValue AS DebtDiscountValue,
+                        ISNULL(inv.DebtDiscountAmount, 0) AS DebtDiscountAmount,
+                        inv.CustomerId      AS CustomerId,
                         c.CUSTOMER_NAME     AS CustomerName,
                         c.CUSTOMER_PHONE1   AS CustomerPhone,
                         b.ArabicCurrencyName AS CurrencyAr
@@ -1341,7 +1391,15 @@ namespace PosDashboard.Web.Modules.System
                     DiscountAmount: (decimal)head.DiscountAmount,
                     TzOffset: tzOffset,
                     DeliveryCharge: deliveryDto?.DeliveryCharge ?? 0m,
-                    Delivery: deliveryDto);
+                    Delivery: deliveryDto,
+                    // ---- Deferred payment (debt) ----
+                    IsDeferred: Convert.ToInt32(head.IsDeferred) == 1,
+                    SettledAt: (DateTime?)head.SettledAt,
+                    DebtDiscountType: (string?)head.DebtDiscountType,
+                    DebtDiscountValue: (decimal?)head.DebtDiscountValue,
+                    DebtDiscountAmount: (decimal)head.DebtDiscountAmount,
+                    CustomerOpenDebt: DebtApiController.GetCustomerOpenDebt(
+                        conn, (int)head.CustomerId));
 
                 return Ok(new PosDtos.ApiResult<PosDtos.PosReceiptDto>(true, null, dto));
             }

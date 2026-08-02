@@ -20,6 +20,14 @@ namespace PosDashboard.Web.Modules.System
     {
         private readonly ISqlConnections sqlConnections;
 
+        /// <summary>
+        /// Safety net: the default ADO.NET command timeout is 30s, which is what produced
+        /// "SqlException: Execution Timeout Expired" in production. After the query fixes
+        /// below the endpoint should finish in well under a second, so this ceiling should
+        /// never be reached — it only exists so a slow month never turns into a hard error.
+        /// </summary>
+        private const int CmdTimeoutSeconds = 120;
+
         public DashboardApiController(ISqlConnections sqlConnections)
         {
             this.sqlConnections = sqlConnections;
@@ -83,7 +91,7 @@ namespace PosDashboard.Web.Modules.System
                     (SELECT TRY_CAST(SETTING_VALUE AS int) FROM dbo.SYSTEM_SETTING WHERE SETTING_KEY = 'timeZoneOffset')    AS TzOffset,
                     (SELECT EnglishCurrencyName FROM dbo.BRANCH WHERE BRANCH_ID = @BranchId)                                AS Currency,
                     (SELECT ArabicCurrencyName  FROM dbo.BRANCH WHERE BRANCH_ID = @BranchId)                                AS CurrencyAr",
-                                metaP).FirstOrDefault();
+                                metaP, commandTimeout: CmdTimeoutSeconds).FirstOrDefault();
 
                 int startHour = meta?.StartHour != null ? (int)meta.StartHour : 10;
                 int endHour = meta?.EndHour != null ? (int)meta.EndHour : 22;
@@ -124,13 +132,23 @@ namespace PosDashboard.Web.Modules.System
                         FROM dbo.AppointmentPayments ap
                         INNER JOIN dbo.AppointmentData a ON a.Id = ap.AppointmentId
                         INNER JOIN dbo.INVOICE_PAYMENT_TYPE pt ON pt.INVOICE_PAYMENT_TYPE_ID = ap.PaymentTypeId
+                        -- PERF: الأصل كان (inv.AppointmentId = ... OR inv.Id IN (...)) وهو شرط
+                        -- لا يستطيع SQL Server تنفيذه بـ index seek، فكان يمسح جدول
+                        -- AppointmentInvoices لكل صف payment. صيغة الـ UNION التالية مكافئة
+                        -- منطقياً (نفس الصفوف، نفس TOP 1 حسب Id) لكن قابلة للـ seek.
                         CROSS APPLY (
-                            SELECT TOP 1 inv.CreatedAt, ISNULL(inv.IsVoid, 0) AS IsVoid
-                            FROM dbo.AppointmentInvoices inv
-                            WHERE inv.AppointmentId = ap.AppointmentId
-                               OR inv.Id IN (SELECT ail.InvoiceId FROM dbo.AppointmentInvoiceLines ail
-                                             WHERE ail.AppointmentId = ap.AppointmentId)
-                            ORDER BY inv.Id
+                            SELECT TOP 1 x.CreatedAt, x.IsVoid
+                            FROM (
+                                SELECT inv.Id, inv.CreatedAt, ISNULL(inv.IsVoid, 0) AS IsVoid
+                                FROM dbo.AppointmentInvoices inv
+                                WHERE inv.AppointmentId = ap.AppointmentId
+                                UNION
+                                SELECT inv2.Id, inv2.CreatedAt, ISNULL(inv2.IsVoid, 0) AS IsVoid
+                                FROM dbo.AppointmentInvoiceLines ail
+                                INNER JOIN dbo.AppointmentInvoices inv2 ON inv2.Id = ail.InvoiceId
+                                WHERE ail.AppointmentId = ap.AppointmentId
+                            ) x
+                            ORDER BY x.Id
                         ) ri
                         WHERE a.BranchId = @BranchId
                           AND ri.CreatedAt >= @DateStart AND ri.CreatedAt < @DateEnd
@@ -183,13 +201,20 @@ namespace PosDashboard.Web.Modules.System
                         FROM dbo.AppointmentPayments ap
                         INNER JOIN dbo.AppointmentData a ON a.Id = ap.AppointmentId
                         INNER JOIN dbo.INVOICE_PAYMENT_TYPE pt ON pt.INVOICE_PAYMENT_TYPE_ID = ap.PaymentTypeId
+                        -- PERF: نفس رواية الـ CROSS APPLY أعلاه — OR اتحوّل لـ UNION.
                         CROSS APPLY (
-                            SELECT TOP 1 inv.CreatedAt, ISNULL(inv.IsVoid, 0) AS IsVoid
-                            FROM dbo.AppointmentInvoices inv
-                            WHERE inv.AppointmentId = ap.AppointmentId
-                               OR inv.Id IN (SELECT ail.InvoiceId FROM dbo.AppointmentInvoiceLines ail
-                                             WHERE ail.AppointmentId = ap.AppointmentId)
-                            ORDER BY inv.Id
+                            SELECT TOP 1 x.CreatedAt, x.IsVoid
+                            FROM (
+                                SELECT inv.Id, inv.CreatedAt, ISNULL(inv.IsVoid, 0) AS IsVoid
+                                FROM dbo.AppointmentInvoices inv
+                                WHERE inv.AppointmentId = ap.AppointmentId
+                                UNION
+                                SELECT inv2.Id, inv2.CreatedAt, ISNULL(inv2.IsVoid, 0) AS IsVoid
+                                FROM dbo.AppointmentInvoiceLines ail
+                                INNER JOIN dbo.AppointmentInvoices inv2 ON inv2.Id = ail.InvoiceId
+                                WHERE ail.AppointmentId = ap.AppointmentId
+                            ) x
+                            ORDER BY x.Id
                         ) ri
                         WHERE a.BranchId = @BranchId
                           AND ri.CreatedAt >= @DateStart AND ri.CreatedAt < @DateEnd
@@ -226,8 +251,9 @@ namespace PosDashboard.Web.Modules.System
                     CROSS JOIN WalletToday wal
                     CROSS JOIN PackagesToday pk
                     CROSS JOIN OnlineFullToday onl
-                    CROSS JOIN CashRefundsToday cr;",
-                        p).FirstOrDefault();
+                    CROSS JOIN CashRefundsToday cr
+                    OPTION (RECOMPILE);",
+                        p, commandTimeout: CmdTimeoutSeconds).FirstOrDefault();
 
                 decimal totalCheckout = kpi != null ? (decimal)kpi.NetCheckoutRevenue : 0m;
                 decimal todayDeposit = kpi != null ? (decimal)kpi.TodayDepositRevenue : 0m;
@@ -246,9 +272,13 @@ namespace PosDashboard.Web.Modules.System
                                             SUM(CASE WHEN RefundType = 'WALLET' THEN 1 ELSE 0 END) AS WalletRefunds
                                      FROM dbo.RefundTransactions
                                      WHERE BranchId = @BranchId
-                                       AND CAST(ProcessedAt AS DATE) BETWEEN @FromDateOnly AND @ToDateOnly
-                                       AND Deleted = 0",
-                    p).FirstOrDefault();
+                                       -- PERF: CAST(col AS DATE) يمنع الـ index seek؛
+                                       -- النطاق النصف-مفتوح يرجّع نفس الصفوف بالظبط.
+                                       AND ProcessedAt >= @FromDateOnly
+                                       AND ProcessedAt <  DATEADD(DAY, 1, @ToDateOnly)
+                                       AND Deleted = 0
+                                     OPTION (RECOMPILE)",
+                    p, commandTimeout: CmdTimeoutSeconds).FirstOrDefault();
 
                 var refundSummary = refundSummaryRow != null
                     ? new RefundSummaryDto(
@@ -264,13 +294,20 @@ namespace PosDashboard.Web.Modules.System
                         SELECT ap.PaymentTypeId, ap.Amount
                         FROM dbo.AppointmentPayments ap
                         INNER JOIN dbo.AppointmentData a ON a.Id = ap.AppointmentId
+                        -- PERF: شرط الـ OR اتحوّل لـ UNION قابل للـ seek (نفس مجموعة الصفوف).
                         OUTER APPLY (
-                            SELECT TOP 1 inv.Id AS InvoiceId, ISNULL(inv.IsVoid, 0) AS IsVoid
-                            FROM dbo.AppointmentInvoices inv
-                            WHERE inv.AppointmentId = ap.AppointmentId
-                               OR inv.Id IN (SELECT ail.InvoiceId FROM dbo.AppointmentInvoiceLines ail
-                                             WHERE ail.AppointmentId = ap.AppointmentId)
-                            ORDER BY inv.Id
+                            SELECT TOP 1 x.InvoiceId, x.IsVoid
+                            FROM (
+                                SELECT inv.Id AS InvoiceId, ISNULL(inv.IsVoid, 0) AS IsVoid
+                                FROM dbo.AppointmentInvoices inv
+                                WHERE inv.AppointmentId = ap.AppointmentId
+                                UNION
+                                SELECT inv2.Id, ISNULL(inv2.IsVoid, 0)
+                                FROM dbo.AppointmentInvoiceLines ail
+                                INNER JOIN dbo.AppointmentInvoices inv2 ON inv2.Id = ail.InvoiceId
+                                WHERE ail.AppointmentId = ap.AppointmentId
+                            ) x
+                            ORDER BY x.InvoiceId
                         ) ri
                         WHERE a.BranchId = @BranchId
                           AND ap.PaidAt >= @DateStart AND ap.PaidAt < @DateEnd
@@ -327,8 +364,9 @@ namespace PosDashboard.Web.Modules.System
                         ON pt.INVOICE_PAYMENT_TYPE_ID = ap.PaymentTypeId
                     GROUP BY pt.INVOICE_PAYMENT_TYPE_ID, pt.INVOICE_PAYMENT_TYPE_NAME1, pt.INVOICE_PAYMENT_TYPE_NAME2, pt.DocumentName
                     HAVING SUM(ap.Amount) <> 0   -- include negative balances (refund > income)
-                    ORDER BY SUM(ap.Amount) DESC;",
-                    p)
+                    ORDER BY SUM(ap.Amount) DESC
+                    OPTION (RECOMPILE);",
+                    p, commandTimeout: CmdTimeoutSeconds)
                     .Select(r => new PaymentTypeBreakdownDto(
                         PaymentTypeId: (int)r.PaymentTypeId,
                         PaymentTypeName: (string)(r.PaymentTypeName ?? ""),
@@ -340,37 +378,46 @@ namespace PosDashboard.Web.Modules.System
                 // ---------- 2C: Transactions ----------
                 var transactions = SqlMapper.Query<dynamic>(conn, @"
                 ;WITH
-                -- الـ Wallet payments لكل invoice
-                InvWallet AS (
-                    SELECT ap.AppointmentId, ISNULL(SUM(ap.Amount), 0) AS WalletPaid
-                    FROM dbo.AppointmentPayments ap
-                    INNER JOIN dbo.AppointmentInvoices inv ON inv.AppointmentId = ap.AppointmentId
-                    INNER JOIN dbo.AppointmentData a ON a.Id = ap.AppointmentId
+                -- الـ invoices الأساسية — الأساس اللي كل الـ CTEs بعده بتتقيّد بيه
+                InvBase AS (
+                    SELECT inv.Id          AS InvoiceId,
+                           inv.InvoiceNumber,
+                           inv.AppointmentId,
+                           inv.CreatedAt
+                    FROM dbo.AppointmentInvoices inv
+                    INNER JOIN dbo.AppointmentData a ON a.Id = inv.AppointmentId
                     WHERE a.BranchId = @BranchId
                       AND inv.CreatedAt >= @DateStart AND inv.CreatedAt < @DateEnd
-                      AND ap.IsWalletPayment = 1
                       AND (@StaffId IS NULL OR a.StaffId = @StaffId)
-                    GROUP BY ap.AppointmentId
+                ),
+                -- PERF: كل زوج (invoice, appointment) مرة واحدة. هذا بديل الـ
+                --   INNER JOIN AppointmentPayments ON ap.AppointmentId = inv.AppointmentId
+                --                                  OR ap.AppointmentId IN (...)
+                -- الذي كان يمنع أي index seek على AppointmentPayments. الـ UNION يزيل
+                -- التكرار فيُحسب كل payment مرة واحدة لكل invoice — نفس سلوك الـ OR.
+                InvApptMap AS (
+                    SELECT ib.InvoiceId, ib.AppointmentId
+                    FROM InvBase ib
+                    UNION
+                    SELECT ib.InvoiceId, ail.AppointmentId
+                    FROM InvBase ib
+                    INNER JOIN dbo.AppointmentInvoiceLines ail ON ail.InvoiceId = ib.InvoiceId
                 ),
                 -- الـ FULL non-wallet payments لكل invoice
                 InvFullPaid AS (
-                    SELECT inv.Id AS InvoiceId,
+                    SELECT m.InvoiceId,
                            ISNULL(SUM(ap.Amount), 0) AS NonDepositNonWalletPaid,
                            MAX(ap.PaidAt)            AS LastFullPaidAt
-                    FROM dbo.AppointmentInvoices inv
-                    INNER JOIN dbo.AppointmentData a ON a.Id = inv.AppointmentId
-                    INNER JOIN dbo.AppointmentPayments ap
-                        ON ap.AppointmentId = inv.AppointmentId
-                        OR ap.AppointmentId IN (SELECT ail.AppointmentId FROM dbo.AppointmentInvoiceLines ail
-                                                WHERE ail.InvoiceId = inv.Id)
-                    WHERE a.BranchId = @BranchId
-                      AND inv.CreatedAt >= @DateStart AND inv.CreatedAt < @DateEnd
-                      AND ap.IsWalletPayment = 0
+                    FROM InvApptMap m
+                    INNER JOIN dbo.AppointmentPayments ap ON ap.AppointmentId = m.AppointmentId
+                    WHERE ap.IsWalletPayment = 0
                       AND ap.PaymentAs = 'FULL'
-                      AND (@StaffId IS NULL OR a.StaffId = @StaffId)
-                    GROUP BY inv.Id
+                    GROUP BY m.InvoiceId
                 ),
                 -- آخر non-wallet FULL payment type لكل appointment
+                -- PERF: كان يعمل GROUP BY على جدول AppointmentPayments بالكامل (كل التواريخ من
+                -- بداية التشغيل) ثم يستخدم صفوف الفترة فقط. التقييد على InvBase نفس النتيجة
+                -- تماماً لأن الـ CTE ده مستخدم في LEFT JOIN على AppointmentId من InvBase.
                 InvLastPayType AS (
                 SELECT ap.AppointmentId,
                        STRING_AGG(CASE WHEN @Lang = 'ar' THEN pt.INVOICE_PAYMENT_TYPE_NAME2 ELSE pt.INVOICE_PAYMENT_TYPE_NAME1 END, ' + ')
@@ -386,27 +433,19 @@ namespace PosDashboard.Web.Modules.System
                     ON pt.INVOICE_PAYMENT_TYPE_ID = ap.PaymentTypeId
                 WHERE ap.IsWalletPayment = 0
                   AND ap.PaymentAs = 'FULL'
+                  AND ap.AppointmentId IN (SELECT ib.AppointmentId FROM InvBase ib)
                 GROUP BY ap.AppointmentId
                 ),
                 -- أسماء الـ services لكل invoice (New Sale = متعددة)
+                -- PERF: كان يقرأ AppointmentInvoiceLines بالكامل؛ الآن على invoices الفترة فقط.
+                -- (ملاحظة: الـ CTE القديم InvWallet كان معرَّفاً وغير مُستخدم — تم حذفه.)
                 InvServices AS (
                     SELECT ail.InvoiceId,
                            STRING_AGG(CASE WHEN @Lang = 'ar' THEN i.ITEM_NAME2 ELSE i.ITEM_NAME1 END, ' + ') AS AllServicesName
                     FROM dbo.AppointmentInvoiceLines ail
                     INNER JOIN dbo.ITEM i ON i.ITEM_ID = ail.ItemId
+                    WHERE ail.InvoiceId IN (SELECT ib.InvoiceId FROM InvBase ib)
                     GROUP BY ail.InvoiceId
-                ),
-                -- الـ invoices الأساسية
-                InvBase AS (
-                    SELECT inv.Id          AS InvoiceId,
-                           inv.InvoiceNumber,
-                           inv.AppointmentId,
-                           inv.CreatedAt
-                    FROM dbo.AppointmentInvoices inv
-                    INNER JOIN dbo.AppointmentData a ON a.Id = inv.AppointmentId
-                    WHERE a.BranchId = @BranchId
-                      AND inv.CreatedAt >= @DateStart AND inv.CreatedAt < @DateEnd
-                      AND (@StaffId IS NULL OR a.StaffId = @StaffId)
                 ),
                 InvAmounts AS (
                     SELECT
@@ -604,8 +643,9 @@ namespace PosDashboard.Web.Modules.System
                     DeliveryDate,
                     DeliveryCharge
                 FROM Tx
-                ORDER BY TxAt DESC;",
-                    p)
+                ORDER BY TxAt DESC
+                OPTION (RECOMPILE);",
+                    p, commandTimeout: CmdTimeoutSeconds)
                     .Select(r => {
                         var breakdown = new List<TransactionPaymentBreakdownDto>();
                         try
@@ -693,6 +733,9 @@ namespace PosDashboard.Web.Modules.System
                 FROM dbo.STAFF s
                 INNER JOIN (
                     -- الـ appointments الأصلية (excluding fully-refunded lines)
+                    -- PERF: فلاتر الفرع (BranchId + المدى الزمني) كانت في شرط الـ JOIN بالخارج،
+                    -- فكان الـ engine يحسب الـ correlated subqueries لكل صف في الجدول كله.
+                    -- نزّلناها جوه كل فرع — نفس النتيجة تماماً لأنه INNER JOIN على نفس الأعمدة.
                     SELECT
                         a.Id,
                         a.StaffId,
@@ -713,6 +756,8 @@ namespace PosDashboard.Web.Modules.System
                         ), a.DiscountedUnitPrice) AS DiscountedUnitPrice
                     FROM dbo.AppointmentData a
                     WHERE a.CheckoutStatus = 'checked_out'   -- only actually-paid appointments count
+                      AND a.BranchId = @BranchId
+                      AND a.AppointmentDate BETWEEN @FromDateOnly AND @ToDateOnly
                       AND (NOT EXISTS (
                         -- Exclude appointment if ALL its invoice lines are refunded
                         SELECT 1 FROM dbo.AppointmentInvoiceLines ail2
@@ -740,6 +785,8 @@ namespace PosDashboard.Web.Modules.System
                     FROM dbo.AppointmentCheckoutItems aci
                     INNER JOIN dbo.AppointmentData a ON a.Id = aci.AppointmentId
                     WHERE ISNULL(aci.IsRefunded, 0) = 0
+                      AND a.BranchId = @BranchId
+                      AND a.AppointmentDate BETWEEN @FromDateOnly AND @ToDateOnly
 
                     UNION ALL
 
@@ -761,6 +808,9 @@ namespace PosDashboard.Web.Modules.System
                       AND ISNULL(cps.Served, 0) = 1
                       AND cps.AppointmentId IS NULL
                       AND ISNULL(cps.Deleted, 0) = 0
+                      AND c2.BRANCH_ID = @BranchId
+                      AND cps.ServedDate >= @FromDateOnly
+                      AND cps.ServedDate <  DATEADD(DAY, 1, @ToDateOnly)
 
                 ) a ON a.StaffId = s.Id
                    AND a.BranchId = @BranchId
@@ -771,8 +821,9 @@ namespace PosDashboard.Web.Modules.System
                   AND (@StaffId IS NULL OR s.Id = @StaffId)
                 GROUP BY s.Id, s.EnglishName, s.ArabicName
                 HAVING COUNT(DISTINCT a.Id) > 0
-                ORDER BY TotalRevenue DESC;",
-                p).ToList();
+                ORDER BY TotalRevenue DESC
+                OPTION (RECOMPILE);",
+                p, commandTimeout: CmdTimeoutSeconds).ToList();
 
                 var clientRows = SqlMapper.Query<dynamic>(conn, @"
                 -- الـ appointments الأصلية
@@ -812,31 +863,28 @@ namespace PosDashboard.Web.Modules.System
                 INNER JOIN dbo.ITEM_UNIT iu ON iu.ITEM_ID = a.ItemId AND iu.UNIT_ID = a.UnitId
                 -- ربط الـ invoice للـ OFFER
                 OUTER APPLY (
-                    SELECT TOP 1 inv.PackageOfferId, inv.PackageOfferPrice, inv.InvoiceNumber
-                    FROM dbo.AppointmentInvoices inv
-                    WHERE inv.AppointmentId = a.Id
-                       OR inv.Id IN (
-                           SELECT ail.InvoiceId FROM dbo.AppointmentInvoiceLines ail
-                           WHERE ail.AppointmentId = a.Id
-                       )
-                    ORDER BY inv.Id DESC
+                    -- PERF: شرط الـ OR اتحول لـ UNION قابل للـ seek — نفس الصفوف ونفس TOP 1 by Id DESC.
+                    SELECT TOP 1 x.Id AS InvoiceId, x.PackageOfferId, x.PackageOfferPrice, x.InvoiceNumber
+                    FROM (
+                        SELECT inv.Id, inv.PackageOfferId, inv.PackageOfferPrice, inv.InvoiceNumber
+                        FROM dbo.AppointmentInvoices inv
+                        WHERE inv.AppointmentId = a.Id
+                        UNION
+                        SELECT inv2.Id, inv2.PackageOfferId, inv2.PackageOfferPrice, inv2.InvoiceNumber
+                        FROM dbo.AppointmentInvoiceLines ail
+                        INNER JOIN dbo.AppointmentInvoices inv2 ON inv2.Id = ail.InvoiceId
+                        WHERE ail.AppointmentId = a.Id
+                    ) x
+                    ORDER BY x.Id DESC
                 ) ai
                 -- مجموع الأسعار الأصلية لكل services في نفس الـ invoice
+                -- PERF: كان يكرر نفس بحث الـ invoice داخل subquery ثانٍ؛ الآن يستخدم ai.InvoiceId مباشرة.
                 OUTER APPLY (
                     SELECT ISNULL(SUM(iu2.ITEM_UNIT_PRICE), 0) AS OriginalTotal
                     FROM dbo.AppointmentInvoiceLines ail2
                     INNER JOIN dbo.AppointmentData a2 ON a2.Id = ail2.AppointmentId
                     INNER JOIN dbo.ITEM_UNIT iu2 ON iu2.ITEM_ID = a2.ItemId AND iu2.UNIT_ID = a2.UnitId
-                    WHERE ail2.InvoiceId = (
-                        SELECT TOP 1 inv2.Id
-                        FROM dbo.AppointmentInvoices inv2
-                        WHERE inv2.AppointmentId = a.Id
-                           OR inv2.Id IN (
-                               SELECT ail3.InvoiceId FROM dbo.AppointmentInvoiceLines ail3
-                               WHERE ail3.AppointmentId = a.Id
-                           )
-                        ORDER BY inv2.Id DESC
-                    )
+                    WHERE ail2.InvoiceId = ai.InvoiceId
                 ) pkgTotal
                 WHERE a.BranchId        = @BranchId
                   AND a.AppointmentDate  BETWEEN @FromDateOnly AND @ToDateOnly
@@ -904,11 +952,14 @@ namespace PosDashboard.Web.Modules.System
                   AND cps.AppointmentId IS NULL
                   AND ISNULL(cps.Deleted, 0) = 0
                   AND c.BRANCH_ID             = @BranchId
-                  AND CAST(cps.ServedDate AS DATE) BETWEEN @FromDateOnly AND @ToDateOnly
+                  -- PERF: CAST(col AS DATE) يمنع الـ index seek؛ النطاق النصف-مفتوح يعطي نفس الصفوف
+                  AND cps.ServedDate >= @FromDateOnly
+                  AND cps.ServedDate <  DATEADD(DAY, 1, @ToDateOnly)
                   AND (@StaffId IS NULL OR cps.StaffId = @StaffId)
 
-                ORDER BY StaffId, [Time];",
-                                p).ToList();
+                ORDER BY StaffId, [Time]
+                OPTION (RECOMPILE);",
+                                p, commandTimeout: CmdTimeoutSeconds).ToList();
 
                 var clientsByStaff = clientRows
                     .Where(r => r.StaffId != null)          // defensive: never group a null staff id
@@ -974,8 +1025,9 @@ namespace PosDashboard.Web.Modules.System
                 FROM dbo.AppointmentData
                 WHERE BranchId = @BranchId
                   AND AppointmentDate BETWEEN @FromDateOnly AND @ToDateOnly
-                  AND (@StaffId IS NULL OR StaffId = @StaffId);",
-                    p).FirstOrDefault();
+                  AND (@StaffId IS NULL OR StaffId = @StaffId)
+                OPTION (RECOMPILE);",
+                    p, commandTimeout: CmdTimeoutSeconds).FirstOrDefault();
 
                 var hourlyRows = SqlMapper.Query<dynamic>(conn, @"
                 ;WITH HourBuckets AS (
@@ -1001,8 +1053,9 @@ namespace PosDashboard.Web.Modules.System
                 SELECT ht.Hour, ht.Total AS Count, tp.ServiceName AS TopService
                 FROM HourTotals ht
                 LEFT JOIN TopPerHour tp ON tp.Hour = ht.Hour AND tp.rn = 1
-                ORDER BY ht.Hour;",
-                    p).ToList();
+                ORDER BY ht.Hour
+                OPTION (RECOMPILE);",
+                    p, commandTimeout: CmdTimeoutSeconds).ToList();
 
                 // Build full 0-23 hour grid (fills missing hours with 0)
                 var hourMap = hourlyRows
@@ -1053,8 +1106,9 @@ namespace PosDashboard.Web.Modules.System
                   AND (@StaffId IS NULL OR a.StaffId = @StaffId)
                   AND ISNULL(ac.Deleted, 0) = 0
                 GROUP BY ac.EnglishName, ac.ArabicName
-                ORDER BY Revenue DESC;",
-                p)
+                ORDER BY Revenue DESC
+                OPTION (RECOMPILE);",
+                p, commandTimeout: CmdTimeoutSeconds)
                 .Select(r => new ServiceCategoryBreakdownDto(
                     CategoryName: (string)(r.CategoryName ?? ""),
                     AppointmentCount: (int)r.AppointmentCount,
@@ -1080,10 +1134,16 @@ namespace PosDashboard.Web.Modules.System
                     (SELECT COUNT(*) FROM TodayCustomers tc
                         INNER JOIN dbo.CUSTOMER c ON c.CUSTOMER_ID = tc.CustomerId
                         WHERE ISNULL(c.LoyaltyBalance, 0) > 0
-                           OR (SELECT COUNT(*) FROM dbo.AppointmentData a2
-                               WHERE a2.CustomerId = c.CUSTOMER_ID AND a2.BranchId = @BranchId) >= 5
-                    ) AS VIPCustomers;",
-                    p).FirstOrDefault();
+                           -- PERF: نفس الشرط بالظبط (>= 5) لكنه يتوقف بعد أول 5 صفوف
+                           -- بدلاً من عدّ كل مواعيد العميل من بداية التاريخ.
+                           OR (SELECT COUNT(*) FROM (
+                                   SELECT TOP 5 1 AS one
+                                   FROM dbo.AppointmentData a2
+                                   WHERE a2.CustomerId = c.CUSTOMER_ID AND a2.BranchId = @BranchId
+                               ) t5) >= 5
+                    ) AS VIPCustomers
+                OPTION (RECOMPILE);",
+                    p, commandTimeout: CmdTimeoutSeconds).FirstOrDefault();
 
                 var topClients = SqlMapper.Query<dynamic>(conn, @"
                 ;WITH ApptInvoices AS (
@@ -1112,8 +1172,9 @@ namespace PosDashboard.Web.Modules.System
                 FROM ApptInvoices ai
                 INNER JOIN dbo.CUSTOMER c ON c.CUSTOMER_ID = ai.CustomerId
                 GROUP BY c.CUSTOMER_NAME
-                ORDER BY TotalSpent DESC;",
-                    p)
+                ORDER BY TotalSpent DESC
+                OPTION (RECOMPILE);",
+                    p, commandTimeout: CmdTimeoutSeconds)
                     .Select(r => new TopClientDto(
                         CustomerName: (string)(r.CustomerName ?? ""),
                         TotalSpent: (decimal)r.TotalSpent,

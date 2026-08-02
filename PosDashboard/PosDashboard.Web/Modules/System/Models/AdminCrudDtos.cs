@@ -334,7 +334,14 @@ namespace PosDashboard.Web.Modules.System.Models
             decimal UnpaidSales,
             bool HasRefundHistory,
             string NotificationLang,
-            DateTime CustomerCreatedDate
+            DateTime CustomerCreatedDate,
+            // ---- Deferred payment (debt) ----
+            // TotalDebt is the sum of every OPEN debt invoice (IsDeferred = 1 and
+            // not yet settled). LastPaymentAt is when this customer last had a debt
+            // collected. Both default so callers written before this feature compile.
+            decimal TotalDebt = 0m,
+            int DebtInvoiceCount = 0,
+            DateTime? LastPaymentAt = null
         );
 
         public class CustomerCreateRequest

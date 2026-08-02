@@ -24,6 +24,11 @@ namespace PosDashboard.Web.Modules.System.Services
         public const string KeyDeliveryDateDefaultOn = "delivery.dateDefaultOn";
         public const string KeyDeliveryDefaultLeadDays = "delivery.defaultLeadDays";
 
+        // ---- Deferred payment (debt) ----
+        public const string KeyDebtEnabled = "debt.enabled";
+        public const string KeyDebtAllowSettlementDiscount = "debt.allowSettlementDiscount";
+        public const string KeyDebtCustomerLimit = "debt.customerLimit";
+
         /// <summary>Raw value for one key (branch override wins over the global row).</summary>
         public static string? GetValue(IDbConnection conn, string key, int? branchId = null)
         {
