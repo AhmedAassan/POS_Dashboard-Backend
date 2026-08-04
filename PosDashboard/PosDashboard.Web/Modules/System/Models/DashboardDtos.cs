@@ -61,7 +61,7 @@ namespace PosDashboard.Web.Modules.System.Models
 
         public record DashboardTransactionDto(
             string TransactionId,
-            /// <summary>CHECKOUT | DEPOSIT | WALLET_LOAD | PACKAGE_SALE | REFUND</summary>
+            /// <summary>CHECKOUT | DEPOSIT | WALLET_LOAD | PACKAGE_SALE | REFUND | WALLET_ADJUST</summary>
             string TransactionType,
             string? InvoiceNumber,
             string CustomerName,
@@ -89,7 +89,18 @@ namespace PosDashboard.Web.Modules.System.Models
             bool? IsDelivery = null,
             /// <summary>Branch-local delivery date+time (UTC in DB → converted client-side), null if none.</summary>
             DateTime? DeliveryDate = null,
-            decimal DeliveryCharge = 0m
+            decimal DeliveryCharge = 0m,
+
+            // ── Wallet settlement (TransactionType='WALLET_ADJUST' only) ──
+            /// <summary>'COLLECT' = money came in from an overdrawn wallet.
+            /// 'REFUND' = leftover credit paid back out. Null for every other row.</summary>
+            string? WalletAdjustType = null,
+            /// <summary>Amount written off during the settlement. 0 when nothing was waived.</summary>
+            decimal WalletWaivedAmount = 0m,
+            /// <summary>The wallet that was settled — lets the row deep-link to /wallet.</summary>
+            int? WalletSubscriptionId = null,
+            /// <summary>True when the settlement closed the wallet.</summary>
+            bool WalletClosed = false
         );
 
         public record StaffPerformanceDto(
@@ -160,6 +171,15 @@ namespace PosDashboard.Web.Modules.System.Models
             int CashRefunds,
             int LinkRefunds,
             int WalletRefunds
+        );
+
+        /// <summary>Wallet settlement totals for the selected day/range.</summary>
+        public record WalletAdjustSummaryDto(
+            int TotalAdjustments,
+            decimal TotalCollected,
+            decimal TotalRefunded,
+            decimal TotalWaived,
+            int WalletsClosed
         );
     }
 }

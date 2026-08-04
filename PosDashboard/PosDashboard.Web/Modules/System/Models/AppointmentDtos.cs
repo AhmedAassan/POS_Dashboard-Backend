@@ -297,7 +297,10 @@ namespace PosDashboard.Web.Modules.System.Models
             // Delivery (POS). DeliveryCharge = 0 and Delivery = null for non-delivery
             // invoices and for anything created before the delivery flow existed.
             decimal DeliveryCharge = 0m,
-            PosDashboard.Web.Modules.System.Models.DeliveryDtos.InvoiceDeliveryDto? Delivery = null
+            PosDashboard.Web.Modules.System.Models.DeliveryDtos.InvoiceDeliveryDto? Delivery = null,
+            // Wallet snapshot (name / remaining balance / expiry). Same shape the
+            // POS receipt carries, so the invoice dialog reads one field either way.
+            PosDashboard.Web.Modules.System.Models.WalletDtos.InvoiceWalletInfoDto? Wallet = null
         );
 
         /*split payment history*/

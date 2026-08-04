@@ -706,25 +706,46 @@ namespace PosDashboard.Web.Modules.System
                     if (walletPtId == null) return FailCheckout("WalletAmount given but WalletPaymentTypeId is missing");
 
                     var sub = SqlMapper.Query(conn, @"
-                        SELECT s.Id, s.CustomerRef, s.EndDate,
-                               ISNULL(s.Deleted, 0) AS Deleted,
-                               ISNULL(s.IsPaid, 0)  AS IsPaid,
+                        SELECT s.Id, s.CustomerRef, s.EndDate, s.[Count] AS [Count],
+                               ISNULL(s.Deleted, 0)  AS Deleted,
+                               ISNULL(s.IsPaid, 0)   AS IsPaid,
+                               ISNULL(s.IsClosed, 0) AS IsClosed,
+                               ISNULL(s.AllowOverdraft, ISNULL(st.AllowOverdraft, 0)) AS AllowOverdraft,
+                               ISNULL(s.MaxCount, st.MaxCount) AS MaxCount,
                                ISNULL((
                                    SELECT TOP 1 sh.Balance FROM dbo.SubscriptionsHistory sh
                                    WHERE sh.SubscriptionId = s.Id AND sh.Deleted = 0
                                    ORDER BY sh.Id DESC), 0) AS CurrentBalance
-                        FROM dbo.Subscriptions s WHERE s.Id = @Id",
+                        FROM dbo.Subscriptions s
+                        INNER JOIN dbo.SUBS_TYPE st ON st.ID = s.SubTypeId
+                        WHERE s.Id = @Id",
                         new { Id = walletSubId.Value }).FirstOrDefault();
 
                     if (sub == null || (int)sub.Deleted == 1) return FailCheckout("Wallet subscription not found");
                     if ((int)sub.IsPaid != 1) return FailCheckout("Wallet subscription is not paid");
+                    if (Convert.ToInt32(sub.IsClosed) == 1) return FailCheckout("This wallet has been closed");
                     if ((DateTime)sub.EndDate < DateTime.UtcNow) return FailCheckout("Wallet subscription has expired");
                     if ((Guid)sub.CustomerRef != (Guid)customer.RefGuide) return FailCheckout("Wallet subscription does not belong to this customer");
 
                     walletBalanceBefore = (decimal)sub.CurrentBalance;
                     walletCustomerRef = (Guid)sub.CustomerRef;
-                    if (walletBalanceBefore < walletAmount)
-                        return FailCheckout($"Insufficient wallet balance. Available: {walletBalanceBefore:F3}");
+
+                    // Overdraft: a type with MaxCount > Count lets the balance go
+                    // negative, down to -(MaxCount - Count). With overdraft off the
+                    // allowance is 0 and this collapses to the original check.
+                    decimal walletCount = sub.Count == null ? 0m : Convert.ToDecimal(sub.Count);
+                    bool walletAllowOverdraft = Convert.ToInt32(sub.AllowOverdraft ?? 0) == 1;
+                    decimal? walletMaxCount = sub.MaxCount == null ? (decimal?)null : Convert.ToDecimal(sub.MaxCount);
+                    decimal walletOverdraftLimit =
+                        (walletAllowOverdraft && walletMaxCount.HasValue && walletMaxCount.Value > walletCount)
+                            ? walletMaxCount.Value - walletCount
+                            : 0m;
+
+                    decimal walletSpendable = walletBalanceBefore + walletOverdraftLimit;
+                    if (walletSpendable < walletAmount)
+                        return FailCheckout(walletOverdraftLimit > 0
+                            ? $"Insufficient wallet balance. Available (incl. overdraft): {walletSpendable:F3}"
+                            : $"Insufficient wallet balance. Available: {walletBalanceBefore:F3}");
 
                     var walletPt = SqlMapper.Query(conn,
                         @"SELECT INVOICE_PAYMENT_TYPE_ID FROM dbo.INVOICE_PAYMENT_TYPE WHERE INVOICE_PAYMENT_TYPE_ID = @Id",
@@ -1290,8 +1311,15 @@ namespace PosDashboard.Web.Modules.System
                     new { AppointmentId = leadApptId })
                     .Select(p => new PosDtos.PosReceiptPaymentDto(
                         PaymentTypeId: (int)(p.PaymentTypeId ?? 0),
-                        PaymentTypeName: (string?)p.Name ?? "",
-                        PaymentTypeNameAr: (string?)p.NameAr ?? (string?)p.Name ?? "",
+                        // A wallet payment stores the underlying payment type on the
+                        // row, so the raw name reads "Cash" — which is wrong on a
+                        // receipt: the customer paid from their wallet, and nothing
+                        // was handed over the counter. Same substitution the
+                        // appointment invoice already does.
+                        PaymentTypeName: Convert.ToInt32(p.IsWallet) == 1
+                            ? "Wallet" : ((string?)p.Name ?? ""),
+                        PaymentTypeNameAr: Convert.ToInt32(p.IsWallet) == 1
+                            ? "محفظة" : ((string?)p.NameAr ?? (string?)p.Name ?? ""),
                         Amount: (decimal)p.Amount,
                         IsWallet: Convert.ToInt32(p.IsWallet) == 1))
                     .ToList();
@@ -1399,6 +1427,11 @@ namespace PosDashboard.Web.Modules.System
                     DebtDiscountValue: (decimal?)head.DebtDiscountValue,
                     DebtDiscountAmount: (decimal)head.DebtDiscountAmount,
                     CustomerOpenDebt: DebtApiController.GetCustomerOpenDebt(
+                        conn, (int)head.CustomerId),
+                    // Wallet block for the invoice dialog (Part 4). Read once here
+                    // so /pos and /dashboard render the same figures — the receipt
+                    // is the single source both screens go through.
+                    Wallet: WalletApiController.LoadInvoiceWalletInfo(
                         conn, (int)head.CustomerId));
 
                 return Ok(new PosDtos.ApiResult<PosDtos.PosReceiptDto>(true, null, dto));

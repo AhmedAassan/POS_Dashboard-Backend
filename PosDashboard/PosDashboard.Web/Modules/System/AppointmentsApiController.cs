@@ -11,6 +11,7 @@ using System.Data;
 using System.Linq;
 using static PosDashboard.Web.Modules.System.Models.AppointmentDtos;
 using DeliveryDtos = PosDashboard.Web.Modules.System.Models.DeliveryDtos;
+using WalletDtos = PosDashboard.Web.Modules.System.Models.WalletDtos;
 
 namespace PosDashboard.Web.Modules.System
 {
@@ -1596,6 +1597,21 @@ namespace PosDashboard.Web.Modules.System
             try { deliveryDto = DeliveryApiController.LoadInvoiceDelivery(conn, invoiceId); }
             catch { /* table may not exist yet — ignore */ }
 
+            // Wallet snapshot (Part 4). The invoice header query above does not
+            // carry CustomerId, so it is read here rather than widening a query
+            // three other code paths depend on.
+            WalletDtos.InvoiceWalletInfoDto? walletDto = null;
+            try
+            {
+                var invCustomerId = SqlMapper.Query<int?>(conn,
+                    "SELECT TOP 1 CustomerId FROM dbo.AppointmentInvoices WHERE Id = @Id",
+                    new { Id = invoiceId }).FirstOrDefault();
+
+                if (invCustomerId.HasValue && invCustomerId.Value > 0)
+                    walletDto = WalletApiController.LoadInvoiceWalletInfo(conn, invCustomerId.Value);
+            }
+            catch { /* never block an invoice on the wallet lookup */ }
+
             var dto = new DetailedInvoiceDto(
                 Id: invoiceId,
                 InvoiceNumber: (string)invoice.InvoiceNumber,
@@ -1628,7 +1644,8 @@ namespace PosDashboard.Web.Modules.System
                     ? 0m : (decimal)invoice.DiscountAmount,
                 DeliveryCharge: invoice.DeliveryCharge is DBNull || invoice.DeliveryCharge == null
                     ? 0m : (decimal)invoice.DeliveryCharge,
-                Delivery: deliveryDto
+                Delivery: deliveryDto,
+                Wallet: walletDto
             );
 
             return Ok(new ApiResult<DetailedInvoiceDto>(true, null, dto));

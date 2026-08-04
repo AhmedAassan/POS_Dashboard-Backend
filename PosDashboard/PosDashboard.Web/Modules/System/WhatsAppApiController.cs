@@ -28,7 +28,7 @@ namespace PosDashboard.Web.Modules.System
 
         // Token is SERVER-SIDE ONLY — never exposed to frontend
         private const string EnjazatikUrl = "https://business.enjazatik.com/api/v1/send-message";
-        
+
 
         private readonly IConfiguration _configuration;
 
@@ -625,6 +625,13 @@ namespace PosDashboard.Web.Modules.System
             if (invoice == null)
                 return Ok(new ApiResult<SendWhatsAppResponse>(false, "Invoice not found", null));
 
+            // Wallet snapshot (Part 4). Read from the same helper the invoice
+            // dialog uses, so the WhatsApp message and the printed receipt can
+            // never disagree about the remaining balance.
+            Models.WalletDtos.InvoiceWalletInfoDto? walletInfo = null;
+            try { walletInfo = WalletApiController.LoadInvoiceWalletInfo(conn, (int)invoice.CustomerId); }
+            catch { /* never block the receipt on the wallet lookup */ }
+
             // Pull all sale lines if available; otherwise fall back to the lead appointment alone.
             var lines = conn.Query<dynamic>(@"
         SELECT  ail.DiscountedUnitPrice  AS Price,
@@ -681,6 +688,18 @@ namespace PosDashboard.Web.Modules.System
                 sb.AppendLine($"Total: {currency} {((decimal)invoice.TotalAmount):F2}");
                 if (rem > 0) sb.AppendLine($"Remaining: {currency} {rem:F2}");
                 sb.AppendLine($"📄 Invoice: {pdfUrl}");
+                if (walletInfo != null)
+                {
+                    sb.AppendLine("━━━━━━━━━━━━━━━━━━");
+                    sb.AppendLine("👛 *Your Wallet*");
+                    sb.AppendLine($"Wallet: {walletInfo.SubTypeName}");
+                    if (walletInfo.CurrentBalance < 0)
+                        sb.AppendLine($"Amount due: {currency} {walletInfo.AmountOwed:F2}");
+                    else
+                        sb.AppendLine($"Remaining balance: {currency} {walletInfo.CurrentBalance:F2}");
+                    sb.AppendLine($"Valid until: {walletInfo.EndDate:dd MMM yyyy}"
+                                  + (walletInfo.IsExpired ? " (expired)" : ""));
+                }
                 sb.AppendLine("━━━━━━━━━━━━━━━━━━");
                 sb.AppendLine(rem > 0 ? "Thank you! The remaining balance is due on arrival." : "Thank you!");
             }
@@ -693,6 +712,18 @@ namespace PosDashboard.Web.Modules.System
                 sb.AppendLine($"السعر الكلي: {((decimal)invoice.TotalAmount):F2} {currency}");
                 if (rem > 0) sb.AppendLine($"المتبقي: {rem:F2} {currency}");
                 sb.AppendLine($"📄 الفاتورة: {pdfUrl}");
+                if (walletInfo != null)
+                {
+                    sb.AppendLine("━━━━━━━━━━━━━━━━━━");
+                    sb.AppendLine("👛 *محفظتك*");
+                    sb.AppendLine($"المحفظة: {walletInfo.SubTypeName}");
+                    if (walletInfo.CurrentBalance < 0)
+                        sb.AppendLine($"المبلغ المستحق عليك: {walletInfo.AmountOwed:F2} {currency}");
+                    else
+                        sb.AppendLine($"الرصيد المتبقي: {walletInfo.CurrentBalance:F2} {currency}");
+                    sb.AppendLine($"صالحة حتى: {walletInfo.EndDate:dd MMM yyyy}"
+                                  + (walletInfo.IsExpired ? " (منتهية)" : ""));
+                }
                 sb.AppendLine("━━━━━━━━━━━━━━━━━━");
                 sb.AppendLine(rem > 0 ? "شكراً لكم! المبلغ المتبقي يُسدَّد عند الحضور." : "شكراً لكم!");
             }

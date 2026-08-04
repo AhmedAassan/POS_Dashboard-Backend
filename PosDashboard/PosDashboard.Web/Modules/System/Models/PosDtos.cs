@@ -376,7 +376,10 @@ namespace PosDashboard.Web.Modules.System.Models
             decimal DebtDiscountAmount = 0m,
             // Open debt for THIS customer at the moment the receipt was read —
             // lets the receipt show "still owes X" without a second round trip.
-            decimal CustomerOpenDebt = 0m
+            decimal CustomerOpenDebt = 0m,
+            // Wallet snapshot (name / remaining balance / expiry) printed on the
+            // invoice when the customer has one. Null when they don't.
+            WalletDtos.InvoiceWalletInfoDto? Wallet = null
         );
     }
 }

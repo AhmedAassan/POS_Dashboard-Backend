@@ -179,13 +179,32 @@ namespace PosDashboard.Web.Modules.System
                           AND (@StaffId IS NULL OR a.StaffId = @StaffId)
                     ),
                     WalletToday AS (
-                        SELECT ISNULL(SUM(sp.PAYMENT_AMOUNT), 0) AS WalletRevenue
-                        FROM dbo.SubscriptionPayment sp
-                        INNER JOIN dbo.Subscriptions s ON s.Id = sp.SubscriptionId
-                        INNER JOIN dbo.CUSTOMER c ON c.CUSTOMER_REF_GUIDE = s.CustomerRef
-                        WHERE c.BRANCH_ID = @BranchId
-                          AND sp.DELETED = 0
-                          AND sp.PAYMENT_DATE >= @DateStart AND sp.PAYMENT_DATE < @DateEnd
+                        -- Wallet income = packages sold + overdrafts collected back.
+                        -- A settlement collection is money that came in the till today
+                        -- against a wallet, so it belongs here and therefore flows
+                        -- into TotalEffectiveRevenue below. A waiver (SettledAmount = 0)
+                        -- moved no money and is excluded.
+                        SELECT ISNULL(SUM(w.Amount), 0) AS WalletRevenue
+                        FROM (
+                            SELECT sp.PAYMENT_AMOUNT AS Amount
+                            FROM dbo.SubscriptionPayment sp
+                            INNER JOIN dbo.Subscriptions s ON s.Id = sp.SubscriptionId
+                            INNER JOIN dbo.CUSTOMER c ON c.CUSTOMER_REF_GUIDE = s.CustomerRef
+                            WHERE c.BRANCH_ID = @BranchId
+                              AND sp.DELETED = 0
+                              AND sp.PAYMENT_DATE >= @DateStart AND sp.PAYMENT_DATE < @DateEnd
+
+                            UNION ALL
+
+                            SELECT wa.SettledAmount
+                            FROM dbo.WalletAdjustments wa
+                            INNER JOIN dbo.CUSTOMER c ON c.CUSTOMER_REF_GUIDE = wa.CustomerRef
+                            WHERE ISNULL(wa.BranchId, c.BRANCH_ID) = @BranchId
+                              AND wa.Deleted = 0
+                              AND wa.AdjustType = 'COLLECT'
+                              AND wa.SettledAmount > 0
+                              AND wa.AddedDate >= @DateStart AND wa.AddedDate < @DateEnd
+                        ) w
                     ),
                     PackagesToday AS (
                         SELECT ISNULL(SUM(pp.PaymentAmount), 0) AS PackagesRevenue
@@ -225,6 +244,9 @@ namespace PosDashboard.Web.Modules.System
                           AND (@StaffId IS NULL OR a.StaffId = @StaffId)
                     ),
                     -- Deduct cash refunds processed today from checkout revenue
+                    -- Deduct cash refunds processed today from checkout revenue.
+                    -- Invoice refunds ONLY: this feeds the Sales card, and a wallet
+                    -- payout reverses no sale.
                     CashRefundsToday AS (
                         SELECT ISNULL(SUM(rt.RefundAmount), 0) AS TotalCashRefunded
                         FROM dbo.RefundTransactions rt
@@ -232,6 +254,28 @@ namespace PosDashboard.Web.Modules.System
                           AND rt.RefundType = 'CASH'
                           AND rt.ProcessedAt >= @DateStart AND rt.ProcessedAt < @DateEnd
                           AND rt.Deleted = 0
+                    ),
+                    -- Money paid back out of a wallet (Adjust → REFUND). It reverses
+                    -- wallet income, so it comes off Total Revenue — but never off
+                    -- Sales, because no sale was reversed.
+                    --
+                    -- Unlike the invoice-refund rule above, BOTH rails count here.
+                    -- WalletToday records wallet income whatever rail it arrived on,
+                    -- so the reversal has to match, or a LINK payout would leave
+                    -- income on the books that no longer exists.
+                    --
+                    -- The window is @DateStart/@DateEnd — the offset-adjusted UTC
+                    -- window every other KPI uses — so this figure and the Refunds
+                    -- card describe the same set of settlements.
+                    WalletRefundsToday AS (
+                        SELECT ISNULL(SUM(wa.SettledAmount), 0) AS TotalWalletRefunded
+                        FROM dbo.WalletAdjustments wa
+                        INNER JOIN dbo.CUSTOMER c ON c.CUSTOMER_REF_GUIDE = wa.CustomerRef
+                        WHERE ISNULL(wa.BranchId, c.BRANCH_ID) = @BranchId
+                          AND wa.Deleted = 0
+                          AND wa.AdjustType = 'REFUND'
+                          AND wa.SettledAmount > 0
+                          AND wa.AddedDate >= @DateStart AND wa.AddedDate < @DateEnd
                     )
                     SELECT
                         c.TotalInvoicePaid        AS TotalCheckoutRevenue,
@@ -243,8 +287,10 @@ namespace PosDashboard.Web.Modules.System
                         cr.TotalCashRefunded,
                         -- Checkout revenue net of cash refunds (can go negative — by design)
                         (c.TotalInvoicePaid - cr.TotalCashRefunded) AS NetCheckoutRevenue,
+                        wr.TotalWalletRefunded,
                         ((c.TotalInvoicePaid - cr.TotalCashRefunded) + d.TodayDepositRevenue
-                         + wal.WalletRevenue + pk.PackagesRevenue + onl.OnlineFullRevenue) AS TotalEffectiveRevenue 
+                         + wal.WalletRevenue + pk.PackagesRevenue + onl.OnlineFullRevenue
+                         - wr.TotalWalletRefunded) AS TotalEffectiveRevenue 
                     FROM CheckoutToday c
                     CROSS JOIN DepositsToday d
                     CROSS JOIN PendingDeposits p
@@ -252,6 +298,7 @@ namespace PosDashboard.Web.Modules.System
                     CROSS JOIN PackagesToday pk
                     CROSS JOIN OnlineFullToday onl
                     CROSS JOIN CashRefundsToday cr
+                    CROSS JOIN WalletRefundsToday wr
                     OPTION (RECOMPILE);",
                         p, commandTimeout: CmdTimeoutSeconds).FirstOrDefault();
 
@@ -265,18 +312,39 @@ namespace PosDashboard.Web.Modules.System
 
                 // ---------- 2H: Refund Summary ----------
                 var refundSummaryRow = SqlMapper.Query<dynamic>(conn, @"
+                                     ;WITH AllRefunds AS (
+                                         SELECT rt.RefundAmount AS RefundAmount, rt.RefundType AS RefundType
+                                         FROM dbo.RefundTransactions rt
+                                         WHERE rt.BranchId = @BranchId
+                                           -- PERF: CAST(col AS DATE) يمنع الـ index seek؛
+                                           -- النطاق النصف-مفتوح يرجّع نفس الصفوف بالظبط.
+                                           AND rt.ProcessedAt >= @FromDateOnly
+                                           AND rt.ProcessedAt <  DATEADD(DAY, 1, @ToDateOnly)
+                                           AND rt.Deleted = 0
+
+                                         UNION ALL
+
+                                         -- Money paid back out of a wallet settlement is a
+                                         -- refund by every meaning the card has: it leaves
+                                         -- the till and reverses earlier income. RefundMethod
+                                         -- already uses the same CASH/LINK vocabulary, so the
+                                         -- per-type counters keep working unchanged.
+                                         SELECT wa.SettledAmount, wa.RefundMethod
+                                         FROM dbo.WalletAdjustments wa
+                                         INNER JOIN dbo.CUSTOMER c ON c.CUSTOMER_REF_GUIDE = wa.CustomerRef
+                                         WHERE ISNULL(wa.BranchId, c.BRANCH_ID) = @BranchId
+                                           AND wa.Deleted = 0
+                                           AND wa.AdjustType = 'REFUND'
+                                           AND wa.SettledAmount > 0
+                                           AND wa.AddedDate >= @DateStart
+                                           AND wa.AddedDate <  @DateEnd
+                                     )
                                      SELECT COUNT(*) AS TotalRefunds,
                                             ISNULL(SUM(RefundAmount), 0)                          AS TotalRefundAmount,
                                             SUM(CASE WHEN RefundType = 'CASH'   THEN 1 ELSE 0 END) AS CashRefunds,
                                             SUM(CASE WHEN RefundType = 'LINK'   THEN 1 ELSE 0 END) AS LinkRefunds,
                                             SUM(CASE WHEN RefundType = 'WALLET' THEN 1 ELSE 0 END) AS WalletRefunds
-                                     FROM dbo.RefundTransactions
-                                     WHERE BranchId = @BranchId
-                                       -- PERF: CAST(col AS DATE) يمنع الـ index seek؛
-                                       -- النطاق النصف-مفتوح يرجّع نفس الصفوف بالظبط.
-                                       AND ProcessedAt >= @FromDateOnly
-                                       AND ProcessedAt <  DATEADD(DAY, 1, @ToDateOnly)
-                                       AND Deleted = 0
+                                     FROM AllRefunds
                                      OPTION (RECOMPILE)",
                     p, commandTimeout: CmdTimeoutSeconds).FirstOrDefault();
 
@@ -331,21 +399,52 @@ namespace PosDashboard.Web.Modules.System
                         WHERE c.BRANCH_ID = @BranchId
                           AND ISNULL(pp.Deleted, 0) = 0
                           AND pp.AddedDate >= @DateStart AND pp.AddedDate < @DateEnd
+                        UNION ALL
+                        -- Wallet settlement collections. The cashier picked a real
+                        -- payment type when taking the money, so it lands on that row
+                        -- exactly like any other payment.
+                        SELECT wa.PaymentTypeId, wa.SettledAmount
+                        FROM dbo.WalletAdjustments wa
+                        INNER JOIN dbo.CUSTOMER c ON c.CUSTOMER_REF_GUIDE = wa.CustomerRef
+                        WHERE ISNULL(wa.BranchId, c.BRANCH_ID) = @BranchId
+                          AND wa.Deleted = 0
+                          AND wa.AdjustType = 'COLLECT'
+                          AND wa.PaymentTypeId IS NOT NULL
+                          AND wa.SettledAmount > 0
+                          AND wa.AddedDate >= @DateStart AND wa.AddedDate < @DateEnd
                     ),
                     -- Cash refunds processed today — subtract from whichever payment type is 'Cash'
                     CashRefundsByType AS (
                         SELECT
                             pt.INVOICE_PAYMENT_TYPE_ID AS PaymentTypeId,
-                            -ISNULL(SUM(rt.RefundAmount), 0) AS Amount
-                        FROM dbo.RefundTransactions rt
-                        -- Map CASH refunds to the cash payment type row
+                            -ISNULL(SUM(r.Amount), 0) AS Amount
+                        FROM (
+                            SELECT rt.RefundAmount AS Amount
+                            FROM dbo.RefundTransactions rt
+                            WHERE rt.BranchId   = @BranchId
+                              AND rt.RefundType  = 'CASH'
+                              AND rt.ProcessedAt >= @DateStart AND rt.ProcessedAt < @DateEnd
+                              AND rt.Deleted = 0
+
+                            UNION ALL
+
+                            -- Cash paid back to close a wallet leaves the drawer just
+                            -- like an invoice refund, so it reduces the Cash row too.
+                            -- A LINK payout never touches the drawer and is excluded.
+                            SELECT wa.SettledAmount
+                            FROM dbo.WalletAdjustments wa
+                            INNER JOIN dbo.CUSTOMER c ON c.CUSTOMER_REF_GUIDE = wa.CustomerRef
+                            WHERE ISNULL(wa.BranchId, c.BRANCH_ID) = @BranchId
+                              AND wa.Deleted = 0
+                              AND wa.AdjustType   = 'REFUND'
+                              AND wa.RefundMethod = 'CASH'
+                              AND wa.SettledAmount > 0
+                              AND wa.AddedDate >= @DateStart AND wa.AddedDate < @DateEnd
+                        ) r
+                        -- Map cash payouts to the cash payment type row
                         INNER JOIN dbo.INVOICE_PAYMENT_TYPE pt
                             ON UPPER(pt.INVOICE_PAYMENT_TYPE_NAME1) LIKE '%CASH%'
                             OR UPPER(pt.DocumentName) LIKE '%CASH%'
-                        WHERE rt.BranchId   = @BranchId
-                          AND rt.RefundType  = 'CASH'
-                          AND rt.ProcessedAt >= @DateStart AND rt.ProcessedAt < @DateEnd
-                          AND rt.Deleted = 0
                         GROUP BY pt.INVOICE_PAYMENT_TYPE_ID
                     ),
                     Combined AS (
@@ -489,7 +588,11 @@ namespace PosDashboard.Web.Modules.System
                         CASE WHEN @Lang = 'ar' THEN dt.NameAr ELSE dt.NameEn END AS DeliveryTypeName,
                         dt.IsDelivery                 AS IsDelivery,
                         ai.DeliveryDate               AS DeliveryDate,
-                        ISNULL(ai.DeliveryCharge, 0)  AS DeliveryCharge
+                        ISNULL(ai.DeliveryCharge, 0)  AS DeliveryCharge,
+                        CAST(NULL AS NVARCHAR(20))    AS WalletAdjustType,
+                        CAST(0 AS DECIMAL(18,3))      AS WalletWaivedAmount,
+                        CAST(NULL AS INT)             AS WalletSubscriptionId,
+                        CAST(0 AS BIT)                AS WalletClosed
                     FROM InvAmounts ia
                     INNER JOIN dbo.AppointmentData a ON a.Id = ia.AppointmentId
                     INNER JOIN dbo.CUSTOMER c        ON c.CUSTOMER_ID = a.CustomerId
@@ -520,7 +623,11 @@ namespace PosDashboard.Web.Modules.System
                         CAST(NULL AS NVARCHAR(100))  AS DeliveryTypeName,
                         CAST(NULL AS BIT)            AS IsDelivery,
                         CAST(NULL AS DATETIME2(0))   AS DeliveryDate,
-                        CAST(0 AS DECIMAL(18,3))     AS DeliveryCharge
+                        CAST(0 AS DECIMAL(18,3))     AS DeliveryCharge,
+                        CAST(NULL AS NVARCHAR(20))   AS WalletAdjustType,
+                        CAST(0 AS DECIMAL(18,3))     AS WalletWaivedAmount,
+                        CAST(NULL AS INT)            AS WalletSubscriptionId,
+                        CAST(0 AS BIT)               AS WalletClosed
                     FROM dbo.AppointmentPayments ap
                     INNER JOIN dbo.AppointmentData a ON a.Id = ap.AppointmentId
                     INNER JOIN dbo.CUSTOMER c        ON c.CUSTOMER_ID = a.CustomerId
@@ -553,7 +660,11 @@ namespace PosDashboard.Web.Modules.System
                         CAST(NULL AS NVARCHAR(100))  AS DeliveryTypeName,
                         CAST(NULL AS BIT)            AS IsDelivery,
                         CAST(NULL AS DATETIME2(0))   AS DeliveryDate,
-                        CAST(0 AS DECIMAL(18,3))     AS DeliveryCharge
+                        CAST(0 AS DECIMAL(18,3))     AS DeliveryCharge,
+                        CAST(NULL AS NVARCHAR(20))   AS WalletAdjustType,
+                        CAST(0 AS DECIMAL(18,3))     AS WalletWaivedAmount,
+                        CAST(NULL AS INT)            AS WalletSubscriptionId,
+                        CAST(0 AS BIT)               AS WalletClosed
                     FROM dbo.SubscriptionPayment sp
                     INNER JOIN dbo.Subscriptions s ON s.Id = sp.SubscriptionId
                     INNER JOIN dbo.CUSTOMER c      ON c.CUSTOMER_REF_GUIDE = s.CustomerRef
@@ -583,7 +694,11 @@ namespace PosDashboard.Web.Modules.System
                         CAST(NULL AS NVARCHAR(100))  AS DeliveryTypeName,
                         CAST(NULL AS BIT)            AS IsDelivery,
                         CAST(NULL AS DATETIME2(0))   AS DeliveryDate,
-                        CAST(0 AS DECIMAL(18,3))     AS DeliveryCharge
+                        CAST(0 AS DECIMAL(18,3))     AS DeliveryCharge,
+                        CAST(NULL AS NVARCHAR(20))   AS WalletAdjustType,
+                        CAST(0 AS DECIMAL(18,3))     AS WalletWaivedAmount,
+                        CAST(NULL AS INT)            AS WalletSubscriptionId,
+                        CAST(0 AS BIT)               AS WalletClosed
                     FROM dbo.CustomerPackagePayments pp
                     INNER JOIN dbo.CustomerPackages cp  ON cp.Id = pp.CustomerPackageId
                     INNER JOIN dbo.Packages pkg         ON pkg.Id = cp.PackageId
@@ -616,13 +731,68 @@ namespace PosDashboard.Web.Modules.System
                         CAST(NULL AS NVARCHAR(100))  AS DeliveryTypeName,
                         CAST(NULL AS BIT)            AS IsDelivery,
                         CAST(NULL AS DATETIME2(0))   AS DeliveryDate,
-                        CAST(0 AS DECIMAL(18,3))     AS DeliveryCharge
+                        CAST(0 AS DECIMAL(18,3))     AS DeliveryCharge,
+                        CAST(NULL AS NVARCHAR(20))   AS WalletAdjustType,
+                        CAST(0 AS DECIMAL(18,3))     AS WalletWaivedAmount,
+                        CAST(NULL AS INT)            AS WalletSubscriptionId,
+                        CAST(0 AS BIT)               AS WalletClosed
                     FROM dbo.RefundTransactions rt
                     INNER JOIN dbo.AppointmentInvoices ai ON ai.Id = rt.InvoiceId
                     INNER JOIN dbo.CUSTOMER c ON c.CUSTOMER_ID = rt.CustomerId
                     WHERE rt.BranchId = @BranchId
                       AND rt.ProcessedAt >= @DateStart AND rt.ProcessedAt < @DateEnd
                       AND rt.Deleted = 0
+
+                    UNION ALL
+
+                    -- ── WALLET SETTLEMENT (Adjust) ────────────────────────────
+                    -- COLLECT: an overdrawn wallet was paid off  → positive amount.
+                    -- REFUND : leftover credit was handed back   → negative amount,
+                    --          which is what makes the row render red client-side.
+                    -- A pure waiver (SettledAmount = 0) still produces a row: the
+                    -- write-off is a real event the day's log has to account for.
+                    SELECT
+                        'WADJ-' + CAST(wa.Id AS varchar(20)),
+                        'WALLET_ADJUST',
+                        NULL,
+                        c.CUSTOMER_NAME,
+                        NULL,                                  -- StaffName
+                        st.NAME,                               -- ServiceName = wallet type
+                        CASE WHEN wa.AdjustType = 'REFUND'
+                             THEN -wa.SettledAmount
+                             ELSE  wa.SettledAmount END,
+                        ISNULL(
+                            CASE WHEN wa.AdjustType = 'REFUND'
+                                 THEN wa.RefundMethod
+                                 ELSE CASE WHEN @Lang = 'ar'
+                                           THEN pt.INVOICE_PAYMENT_TYPE_NAME2
+                                           ELSE pt.INVOICE_PAYMENT_TYPE_NAME1 END
+                            END, '-'),
+                        NULL,                                  -- PaymentBreakdownJson
+                        NULL,                                  -- AppointmentId
+                        wa.AddedDate,
+                        CASE WHEN wa.AdjustType = 'REFUND' THEN 'refunded' ELSE 'completed' END,
+                        CAST(NULL AS INT)            AS PackageOfferId,
+                        CAST(NULL AS NVARCHAR(255))  AS PackageOfferName,
+                        CAST(NULL AS DECIMAL(18,3))  AS PackageOfferPrice,
+                        CAST(0 AS BIT)               AS IsFullyRefunded,
+                        CAST(0 AS BIT)               AS IsVoid,
+                        CAST(NULL AS NVARCHAR(100))  AS DeliveryTypeName,
+                        CAST(NULL AS BIT)            AS IsDelivery,
+                        CAST(NULL AS DATETIME2(0))   AS DeliveryDate,
+                        CAST(0 AS DECIMAL(18,3))     AS DeliveryCharge,
+                        wa.AdjustType                AS WalletAdjustType,
+                        ISNULL(wa.WaivedAmount, 0)   AS WalletWaivedAmount,
+                        wa.SubscriptionId            AS WalletSubscriptionId,
+                        ISNULL(wa.ClosedWallet, 0)   AS WalletClosed
+                    FROM dbo.WalletAdjustments wa
+                    INNER JOIN dbo.Subscriptions s2 ON s2.Id = wa.SubscriptionId
+                    INNER JOIN dbo.SUBS_TYPE st     ON st.ID = s2.SubTypeId
+                    INNER JOIN dbo.CUSTOMER c       ON c.CUSTOMER_REF_GUIDE = wa.CustomerRef
+                    LEFT  JOIN dbo.INVOICE_PAYMENT_TYPE pt ON pt.INVOICE_PAYMENT_TYPE_ID = wa.PaymentTypeId
+                    WHERE ISNULL(wa.BranchId, c.BRANCH_ID) = @BranchId
+                      AND wa.Deleted = 0
+                      AND wa.AddedDate >= @DateStart AND wa.AddedDate < @DateEnd
                 )
                 SELECT
                     TransactionId, TransactionType, InvoiceNumber, CustomerName,
@@ -641,7 +811,11 @@ namespace PosDashboard.Web.Modules.System
                     -- DeliveryDate is stored branch-local already (POS writes branch-local);
                     -- pass through untouched.
                     DeliveryDate,
-                    DeliveryCharge
+                    DeliveryCharge,
+                    WalletAdjustType,
+                    WalletWaivedAmount,
+                    WalletSubscriptionId,
+                    WalletClosed
                 FROM Tx
                 ORDER BY TxAt DESC
                 OPTION (RECOMPILE);",
@@ -702,7 +876,16 @@ namespace PosDashboard.Web.Modules.System
                             DeliveryDate: r.DeliveryDate is DBNull || r.DeliveryDate == null
                                 ? (DateTime?)null : (DateTime?)r.DeliveryDate,
                             DeliveryCharge: r.DeliveryCharge is DBNull || r.DeliveryCharge == null
-                                ? 0m : Convert.ToDecimal(r.DeliveryCharge)
+                                ? 0m : Convert.ToDecimal(r.DeliveryCharge),
+                            // ── Wallet settlement ──
+                            WalletAdjustType: r.WalletAdjustType is DBNull || r.WalletAdjustType == null
+                                ? (string?)null : (string?)r.WalletAdjustType,
+                            WalletWaivedAmount: r.WalletWaivedAmount is DBNull || r.WalletWaivedAmount == null
+                                ? 0m : Convert.ToDecimal(r.WalletWaivedAmount),
+                            WalletSubscriptionId: r.WalletSubscriptionId is DBNull || r.WalletSubscriptionId == null
+                                ? (int?)null : Convert.ToInt32(r.WalletSubscriptionId),
+                            WalletClosed: r.WalletClosed != null && r.WalletClosed is not DBNull
+                                && Convert.ToInt32(r.WalletClosed) == 1
                         );
                     }).ToList();
 
