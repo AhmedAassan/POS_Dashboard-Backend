@@ -60,7 +60,14 @@ namespace PosDashboard.Web.Modules.System.Models
             double DurationMinutes,
             string? ImageUrl,
             string? DocumentName,
-            bool IsActive
+            bool IsActive,
+            /// <summary>The UNIT's own picture (UNIT.DocumentName), shown in the
+            /// unit picker. Null = the client falls back to the item image.</summary>
+            string? UnitImageUrl = null,
+            /// <summary>UNIT.QUICK: a rush unit — same service, delivered faster,
+            /// which is why it costs more. Display flag only; the price is still
+            /// whatever ITEM_UNIT says.</summary>
+            bool IsQuick = false
         );
 
         public record PosStaffDto(
@@ -135,13 +142,29 @@ namespace PosDashboard.Web.Modules.System.Models
         //    POST /api/pos/checkout
         // =====================================================================
 
+        // One ticket line. Quantity > 1 means the SAME item+unit was sold N times:
+        // the server expands it into N service instances (one AppointmentData row,
+        // one invoice line and — when un-staffed — one printable label each), so a
+        // quantity of 3 can still be handed to 3 different staff members.
+        //
+        // Sending the line N times (the pre-quantity client behaviour) remains valid
+        // and produces exactly the same result, so old clients keep working.
         public record PosCheckoutLineRequest(
             int ItemId,
             int UnitId,
             int? StaffId,                  // null / 0 = NO staff -> generates a printable label (Phase 1)
             int? DurationMinutes,          // optional override
             decimal? UnitPriceOverride,    // optional sale-only price (discount). Never written to master.
-            string? Notes
+            string? Notes,
+            int Quantity = 1,              // how many of this item+unit (>= 1)
+            /// <summary>
+            /// The exact ITEM_UNIT row being sold. PREFERRED over ItemId+UnitId:
+            /// one item may carry SEVERAL ITEM_UNIT rows for the same UNIT_ID
+            /// (e.g. two "Session" prices with different durations), and those are
+            /// different products at the till. ItemId+UnitId cannot tell them
+            /// apart, so it is kept only for older clients.
+            /// </summary>
+            int? ItemUnitId = null
         );
 
         public record PosSplitPaymentRequest(
@@ -301,6 +324,15 @@ namespace PosDashboard.Web.Modules.System.Models
         //    GET /api/pos/receipt/{invoiceId}
         // =====================================================================
 
+        // A receipt line is a DISPLAY row, not a storage row: identical service
+        // instances (same item, unit, staff and price, inside the same package
+        // group) are folded into ONE row with Quantity = how many, so buying the
+        // same service 3 times prints "3 x Haircut" instead of three lines.
+        //
+        // Id / AppointmentId therefore reference the FIRST instance of the group.
+        // Refunds and label assignment never read this DTO — they work off
+        // AppointmentInvoiceLines / PosServiceLabels, which stay one row per
+        // instance — so folding here is purely cosmetic and always reversible.
         public record PosReceiptLineDto(
             int? Id,
             int AppointmentId,
@@ -310,13 +342,24 @@ namespace PosDashboard.Web.Modules.System.Models
             string ItemNameAr,
             string StaffName,           // "" when un-staffed
             string StaffNameAr,
-            int Quantity,
+            int Quantity,               // how many identical instances this row folds
             decimal UnitPrice,          // charged unit price AFTER the ticket discount (revenue)
             decimal TotalPrice,         // charged line total AFTER the ticket discount (revenue)
             int? PackageOfferId,
             string? PackageOfferName,
             Guid? PackageGroupId,
-            decimal OriginalUnitPrice = 0m  // listed unit price BEFORE the ticket discount (display)
+            decimal OriginalUnitPrice = 0m, // listed unit price BEFORE the ticket discount (display)
+                                            // The unit the customer actually bought. Now that one item can be sold
+                                            // in several units, the name alone no longer identifies the line.
+            int UnitId = 0,
+            string UnitName = "",
+            string UnitNameAr = "",
+            /// <summary>Charged duration. Two rows can share a unit name and differ
+            /// only here, so the invoice prints it beside the unit.</summary>
+            int DurationMinutes = 0,
+            /// <summary>Rush unit — the invoice flags it so the higher price is
+            /// self-explanatory instead of looking like an overcharge.</summary>
+            bool IsQuick = false
         );
 
         public record PosReceiptPaymentDto(

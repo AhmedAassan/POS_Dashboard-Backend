@@ -551,17 +551,158 @@ namespace PosDashboard.Web.Modules.System
         }
 
         // ════════════════════════════════════════════════════════════
-        // ████  UNITS (Lookup - readonly)  ████
+        // ████  UNITS  ████
+        //
+        // A unit is a lookup that PRICES a service: ITEM_UNIT joins an item to a
+        // unit with its own price and duration, so the same service can be sold
+        // as "Session", "Express", "Package of 5" and so on.
+        //
+        // [Order] drives every list the cashier sees, and QUICK marks a rush unit
+        // (delivered faster, hence priced higher). DocumentName is the unit's own
+        // image, shown in the POS unit picker.
         // ════════════════════════════════════════════════════════════
 
+        private const string UnitSelectSql = @"
+            SELECT
+                u.UNIT_ID      AS UnitId,
+                u.UNIT_NAME1   AS UnitName1,
+                u.UNIT_NAME2   AS UnitName2,
+                u.[Order]      AS [Order],
+                u.QUICK        AS Quick,
+                u.DocumentName AS DocumentName,
+                ISNULL((SELECT COUNT(*) FROM dbo.ITEM_UNIT iu WHERE iu.UNIT_ID = u.UNIT_ID), 0) AS UsageCount
+            FROM dbo.UNIT u";
+
         [HttpGet("units")]
-        public ActionResult<ApiResult<List<UnitDto>>> GetUnits()
+        public ActionResult<ApiResult<List<UnitDto>>> GetUnits([FromQuery] string? search = null)
         {
             using var conn = sqlConnections.NewByKey("Default");
-            var items = conn.Query<UnitDto>(@"
-                SELECT UNIT_ID AS UnitId, UNIT_NAME1 AS UnitName1, UNIT_NAME2 AS UnitName2, [Order]
-                FROM dbo.UNIT ORDER BY [Order], UNIT_ID").ToList();
+            var items = conn.Query<UnitDto>(UnitSelectSql + @"
+                WHERE (@Search IS NULL OR
+                       u.UNIT_NAME1 LIKE '%' + @Search + '%' OR
+                       u.UNIT_NAME2 LIKE '%' + @Search + '%')
+                ORDER BY u.[Order], u.UNIT_ID",
+                new { Search = string.IsNullOrWhiteSpace(search) ? null : search.Trim() }).ToList();
             return Ok(new ApiResult<List<UnitDto>>(true, null, items));
+        }
+
+        [HttpGet("units/{id:int}")]
+        public ActionResult<ApiResult<UnitDto>> GetUnitById(int id)
+        {
+            using var conn = sqlConnections.NewByKey("Default");
+            var item = conn.Query<UnitDto>(UnitSelectSql + " WHERE u.UNIT_ID = @Id", new { Id = id })
+                .FirstOrDefault();
+            if (item == null) return Ok(new ApiResult<UnitDto>(false, "Unit not found", null));
+            return Ok(new ApiResult<UnitDto>(true, null, item));
+        }
+
+        [HttpPost("units")]
+        public ActionResult<ApiResult<UnitDto>> CreateUnit([FromBody] UnitCreateRequest req)
+        {
+            if (string.IsNullOrWhiteSpace(req.UnitName1))
+                return Ok(new ApiResult<UnitDto>(false, "UnitName1 is required", null));
+
+            using var conn = sqlConnections.NewByKey("Default");
+            int userId = GetUserId();
+
+            // UNIT_ID is not an identity column (same as CATEGORY), so the id is
+            // allocated here, exactly the way the other lookups do it.
+            var maxId = conn.Query<int?>("SELECT MAX(UNIT_ID) FROM dbo.UNIT").FirstOrDefault() ?? 0;
+            int newId = maxId + 1;
+
+            // A new unit with no explicit order goes to the END of the list rather
+            // than sharing 0 with everything else, so the POS order stays stable.
+            int order = req.Order > 0
+                ? req.Order
+                : (conn.Query<int?>("SELECT MAX([Order]) FROM dbo.UNIT").FirstOrDefault() ?? 0) + 1;
+
+            conn.Execute(@"
+                INSERT INTO dbo.UNIT (
+                    UNIT_ID, UNIT_NAME1, UNIT_NAME2, [Order], QUICK, DocumentName,
+                    AddedByUserId, AddedDate
+                ) VALUES (
+                    @Id, @Name1, @Name2, @Order, @Quick, @DocumentName,
+                    @UserId, @Now
+                )", new
+            {
+                Id = newId,
+                Name1 = req.UnitName1.Trim(),
+                Name2 = string.IsNullOrWhiteSpace(req.UnitName2) ? req.UnitName1.Trim() : req.UnitName2.Trim(),
+                Order = order,
+                Quick = req.Quick ?? 0,
+                DocumentName = string.IsNullOrWhiteSpace(req.DocumentName) ? null : req.DocumentName,
+                UserId = userId,
+                Now = DateTime.UtcNow
+            });
+
+            return GetUnitById(newId);
+        }
+
+        [HttpPost("units/update/{id:int}")]
+        public ActionResult<ApiResult<UnitDto>> UpdateUnit(int id, [FromBody] UnitUpdateRequest req)
+        {
+            if (string.IsNullOrWhiteSpace(req.UnitName1))
+                return Ok(new ApiResult<UnitDto>(false, "UnitName1 is required", null));
+
+            using var conn = sqlConnections.NewByKey("Default");
+            int userId = GetUserId();
+
+            var exists = conn.Query<int?>("SELECT UNIT_ID FROM dbo.UNIT WHERE UNIT_ID = @Id", new { Id = id })
+                .FirstOrDefault();
+            if (exists == null) return Ok(new ApiResult<UnitDto>(false, "Unit not found", null));
+
+            conn.Execute(@"
+                UPDATE dbo.UNIT SET
+                    UNIT_NAME1 = @Name1, UNIT_NAME2 = @Name2,
+                    [Order] = @Order, QUICK = @Quick, DocumentName = @DocumentName,
+                    ModifiedByUserId = @UserId, LastModifiedDate = @Now
+                WHERE UNIT_ID = @Id", new
+            {
+                Id = id,
+                Name1 = req.UnitName1.Trim(),
+                Name2 = string.IsNullOrWhiteSpace(req.UnitName2) ? req.UnitName1.Trim() : req.UnitName2.Trim(),
+                Order = req.Order,
+                Quick = req.Quick ?? 0,
+                DocumentName = string.IsNullOrWhiteSpace(req.DocumentName) ? null : req.DocumentName,
+                UserId = userId,
+                Now = DateTime.UtcNow
+            });
+
+            return GetUnitById(id);
+        }
+
+        /// <summary>
+        /// Units have no IsActive column, so this is a real DELETE — and it is
+        /// refused while any ITEM_UNIT still points at the unit. Soft-hiding it
+        /// instead would leave priced services referencing a unit the cashier can
+        /// no longer see, which is worse than an honest "in use" error.
+        /// </summary>
+        [HttpPost("units/delete/{id:int}")]
+        public ActionResult<ApiResult<bool>> DeleteUnit(int id)
+        {
+            using var conn = sqlConnections.NewByKey("Default");
+
+            var exists = conn.Query<int?>("SELECT UNIT_ID FROM dbo.UNIT WHERE UNIT_ID = @Id", new { Id = id })
+                .FirstOrDefault();
+            if (exists == null) return Ok(new ApiResult<bool>(false, "Unit not found", false));
+
+            int used = conn.Query<int>(
+                "SELECT COUNT(*) FROM dbo.ITEM_UNIT WHERE UNIT_ID = @Id", new { Id = id }).First();
+            if (used > 0)
+                return Ok(new ApiResult<bool>(false,
+                    $"This unit is used by {used} priced service(s). Remove it from those services first.", false));
+
+            conn.Execute("DELETE FROM dbo.UNIT WHERE UNIT_ID = @Id", new { Id = id });
+            return Ok(new ApiResult<bool>(true, null, true));
+        }
+
+        [HttpPost("units/upload-image")]
+        public async Task<ActionResult<ApiResult<string>>> UploadUnitImage(IFormFile file)
+        {
+            if (file == null || file.Length == 0) return Ok(new ApiResult<string>(false, "No file provided", null));
+            var url = await SaveUploadedFile(file, "units");
+            if (url == null) return Ok(new ApiResult<string>(false, "Invalid file. Max 3MB, jpg/png/webp only.", null));
+            return Ok(new ApiResult<string>(true, null, url));
         }
 
         // ════════════════════════════════════════════════════════════
@@ -598,7 +739,8 @@ namespace PosDashboard.Web.Modules.System
                     i.Description,
                     i.CostPrice,
                     i.Balance,
-                    i.AddedDate
+                    i.AddedDate,
+                    i.ITEM_ORDERING        AS ItemOrdering
                 FROM dbo.ITEM i
                 LEFT JOIN dbo.CATEGORY c ON c.CATEGORY_ID = i.ITEM_CATEGORY_ID
                 LEFT JOIN dbo.AppointmentCategories ac ON ac.Id = i.AppointmentCategoryId
@@ -611,7 +753,9 @@ namespace PosDashboard.Web.Modules.System
                        i.ITEM_NAME1 LIKE '%' + @Search + '%' OR
                        i.ITEM_NAME2 LIKE '%' + @Search + '%' OR
                        i.ITEM_CODE  LIKE '%' + @Search + '%')
-                ORDER BY i.ITEM_ID";
+                -- Same order the POS grid uses, so what the manager arranges here
+                -- is what the cashier sees there.
+                ORDER BY ISNULL(i.ITEM_ORDERING, 2147483647), i.ITEM_NAME1, i.ITEM_ID";
 
             var rawItems = conn.Query<dynamic>(itemSql, new
             {
@@ -668,7 +812,8 @@ namespace PosDashboard.Web.Modules.System
                 (string?)x.DocumentName, (bool)x.ECommerce,
                 (string?)x.Description, (decimal?)x.CostPrice, (decimal)x.Balance,
                 (DateTime)x.AddedDate,
-                unitsByItem.TryGetValue((int)x.ItemId, out var u) ? u : new List<ItemUnitSummaryDto>()
+                unitsByItem.TryGetValue((int)x.ItemId, out var u) ? u : new List<ItemUnitSummaryDto>(),
+                (int?)x.ItemOrdering
             )).ToList();
 
             return Ok(new ApiResult<PagedResult<ItemListDto>>(true, null, BuildPage(items, total, page, pageSize)));
@@ -686,7 +831,8 @@ namespace PosDashboard.Web.Modules.System
                        i.ITEM_TYPE AS ItemType, i.ITEM_CODE AS ItemCode,
                        i.ITEM_IS_ACTIVE AS ItemIsActive, i.DocumentName,
                        CAST(i.ECommerce AS bit) AS ECommerce, i.Description,
-                       i.CostPrice, i.Balance, i.AddedDate
+                       i.CostPrice, i.Balance, i.AddedDate,
+                       i.ITEM_ORDERING AS ItemOrdering
                 FROM dbo.ITEM i
                 LEFT JOIN dbo.CATEGORY c ON c.CATEGORY_ID = i.ITEM_CATEGORY_ID
                 LEFT JOIN dbo.AppointmentCategories ac ON ac.Id = i.AppointmentCategoryId
@@ -715,7 +861,7 @@ namespace PosDashboard.Web.Modules.System
                 (int)raw.ItemType, (string?)raw.ItemCode, (int?)raw.ItemIsActive,
                 (string?)raw.DocumentName, (bool)raw.ECommerce,
                 (string?)raw.Description, (decimal?)raw.CostPrice, (decimal)raw.Balance,
-                (DateTime)raw.AddedDate, units);
+                (DateTime)raw.AddedDate, units, (int?)raw.ItemOrdering);
 
             return Ok(new ApiResult<ItemListDto>(true, null, item));
         }
@@ -741,12 +887,12 @@ namespace PosDashboard.Web.Modules.System
                     ITEM_ID, ITEM_NAME1, ITEM_NAME2, ITEM_CATEGORY_ID,
                     AppointmentCategoryId, ITEM_TYPE, ITEM_CODE, ITEM_IS_ACTIVE,
                     DocumentName, ECommerce, Description, CostPrice, Balance,
-                    ShowOnPOS, ChangePrice, AddedByUserId, AddedDate
+                    ITEM_ORDERING, ShowOnPOS, ChangePrice, AddedByUserId, AddedDate
                 ) VALUES (
                     @ItemId, @Name1, @Name2, @CategoryId,
                     @AppointmentCategoryId, @ItemType, @ItemCode, @IsActive,
                     @DocumentName, @ECommerce, @Description, @CostPrice, 0,
-                    1, 0, @UserId, @Now
+                    @ItemOrdering, 1, 0, @UserId, @Now
                 )", new
             {
                 ItemId = newItemId,
@@ -761,6 +907,14 @@ namespace PosDashboard.Web.Modules.System
                 ECommerce = req.ECommerce ? 1 : 0,
                 req.Description,
                 CostPrice = req.CostPrice,
+                // A new item with no explicit position goes to the END of its
+                // category instead of sharing 0 with everything else, which would
+                // silently reshuffle the POS grid on every insert.
+                ItemOrdering = req.ItemOrdering.HasValue && req.ItemOrdering.Value > 0
+                    ? req.ItemOrdering.Value
+                    : (conn.Query<int?>(
+                        "SELECT MAX(ITEM_ORDERING) FROM dbo.ITEM WHERE ITEM_CATEGORY_ID = @CategoryId",
+                        new { CategoryId = req.ItemCategoryId }).FirstOrDefault() ?? 0) + 1,
                 UserId = userId,
                 Now = DateTime.UtcNow
             });
@@ -823,7 +977,7 @@ namespace PosDashboard.Web.Modules.System
                     ITEM_TYPE = @ItemType, ITEM_CODE = @ItemCode,
                     ITEM_IS_ACTIVE = @IsActive, DocumentName = @DocumentName,
                     ECommerce = @ECommerce, Description = @Description,
-                    CostPrice = @CostPrice,
+                    CostPrice = @CostPrice, ITEM_ORDERING = @ItemOrdering,
                     ModifiedByUserId = @UserId, LastModifiedDate = @Now
                 WHERE ITEM_ID = @Id", new
             {
@@ -839,6 +993,7 @@ namespace PosDashboard.Web.Modules.System
                 ECommerce = req.ECommerce ? 1 : 0,
                 req.Description,
                 CostPrice = req.CostPrice,
+                ItemOrdering = req.ItemOrdering ?? 0,
                 UserId = userId,
                 Now = DateTime.UtcNow
             });

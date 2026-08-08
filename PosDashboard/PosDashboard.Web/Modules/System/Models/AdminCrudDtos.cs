@@ -141,8 +141,31 @@ namespace PosDashboard.Web.Modules.System.Models
             int UnitId,
             string UnitName1,
             string UnitName2,
-            int Order
+            int Order,
+            // QUICK marks a rush unit: the same service delivered faster, which is
+            // why it is priced higher. It is a flag, not a price rule — the price
+            // still lives on ITEM_UNIT.
+            int? Quick = null,
+            string? DocumentName = null,
+            // How many ITEM_UNIT rows point at this unit. Deleting a unit that is
+            // still in use would orphan priced services, so the UI needs to know.
+            int UsageCount = 0
         );
+
+        public class UnitCreateRequest
+        {
+            public string UnitName1 { get; set; } = "";
+            public string UnitName2 { get; set; } = "";
+            public int Order { get; set; } = 0;
+            /// <summary>1 = rush unit (priced higher), 0 / null = normal.</summary>
+            public int? Quick { get; set; } = 0;
+            public string? DocumentName { get; set; }
+        }
+
+        public class UnitUpdateRequest : UnitCreateRequest
+        {
+            public int UnitId { get; set; }
+        }
 
         // ════════════════════════════════════════════════════════════
         // ITEM
@@ -166,7 +189,10 @@ namespace PosDashboard.Web.Modules.System.Models
             decimal Balance,
             DateTime AddedDate,
             // ItemUnits summary
-            List<ItemUnitSummaryDto> Units
+            List<ItemUnitSummaryDto> Units,
+            // Position of the item inside its category on the POS grid. NULL on
+            // legacy rows, which is why every read coalesces it.
+            int? ItemOrdering = 0
         );
 
         public record ItemUnitSummaryDto(
@@ -198,6 +224,9 @@ namespace PosDashboard.Web.Modules.System.Models
             public bool ECommerce { get; set; } = true;
             public string? Description { get; set; }
             public decimal? CostPrice { get; set; }
+            /// <summary>Position on the POS grid inside the category. Lower first;
+            /// items sharing a number fall back to alphabetical order.</summary>
+            public int? ItemOrdering { get; set; }
             public List<ItemUnitCreateRequest> Units { get; set; } = new();
         }
 

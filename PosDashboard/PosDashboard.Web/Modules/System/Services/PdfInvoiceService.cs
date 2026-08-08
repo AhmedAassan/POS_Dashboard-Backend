@@ -247,6 +247,7 @@ namespace PosDashboard.Web.Modules.System.Services
                             {
                                 cols.RelativeColumn(3);    // Item
                                 cols.RelativeColumn(2);    // Staff
+                                cols.ConstantColumn(40);   // Qty
                                 cols.ConstantColumn(90);   // Price
                             });
 
@@ -256,6 +257,8 @@ namespace PosDashboard.Web.Modules.System.Services
                                     .Text("Item / الصنف").FontSize(9).Bold();
                                 header.Cell().Background("#f3f4f6").Padding(6)
                                     .Text("Staff / المختص").FontSize(9).Bold();
+                                header.Cell().Background("#f3f4f6").Padding(6).AlignCenter()
+                                    .Text("Qty / الكمية").FontSize(9).Bold();
                                 header.Cell().Background("#f3f4f6").Padding(6).AlignRight()
                                     .Text("Price / السعر").FontSize(9).Bold();
                             });
@@ -264,13 +267,20 @@ namespace PosDashboard.Web.Modules.System.Services
                             {
                                 var item = standalone[i];
                                 var bg = i % 2 == 0 ? "#ffffff" : "#f9fafb";
+                                int qty = item.Quantity < 1 ? 1 : item.Quantity;
 
                                 table.Cell().Background(bg).Padding(6)
                                     .Text(item.ItemName).FontSize(10).Bold().FontColor("#111827");
                                 table.Cell().Background(bg).Padding(6)
                                     .Text(item.StaffName).FontSize(9).FontColor("#374151");
+                                table.Cell().Background(bg).Padding(6).AlignCenter()
+                                    .Text(qty.ToString()).FontSize(10).Bold().FontColor("#111827");
+                                // The unit price only earns its ink when the quantity
+                                // makes the line total non-obvious.
                                 table.Cell().Background(bg).Padding(6).AlignRight()
-                                    .Text($"{data.Currency} {item.TotalPrice:F2}")
+                                    .Text(qty > 1
+                                        ? $"{data.Currency} {item.TotalPrice:F2}\n({item.UnitPrice:F2} x {qty})"
+                                        : $"{data.Currency} {item.TotalPrice:F2}")
                                     .FontSize(10).Bold().FontColor("#111827");
                             }
                         });

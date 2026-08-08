@@ -56,6 +56,15 @@ namespace PosDashboard.Web.Modules.System
         private readonly IConfiguration _configuration;
         private const string EnjazatikUrl = "https://business.enjazatik.com/api/v1/send-message";
 
+        /// <summary>Ceiling for a single line's Quantity. A cashier who really needs
+        /// more can add the item twice; without a ceiling one typo could insert
+        /// thousands of appointments inside the checkout transaction.</summary>
+        private const int MaxLineQuantity = 99;
+
+        /// <summary>Ceiling for the expanded service instances on one ticket
+        /// (standalone lines; package services are validated separately).</summary>
+        private const int MaxTicketLines = 300;
+
         public PosApiController(
             ISqlConnections sqlConnections,
             IHttpClientFactory httpClientFactory,
@@ -163,6 +172,8 @@ namespace PosDashboard.Web.Modules.System
                         u.UNIT_ID            AS UnitId,
                         u.UNIT_NAME1         AS UnitNameEn,
                         u.UNIT_NAME2         AS UnitNameAr,
+                        u.DocumentName       AS UnitDocumentName,
+                        ISNULL(u.QUICK, 0)   AS Quick,
                         iu.ITEM_UNIT_PRICE   AS Price,
                         iu.MinimumPrice      AS MinimumPrice,
                         CAST(iu.ITEM_UNIT_DURATION AS float) AS DurationMinutes,
@@ -178,7 +189,16 @@ namespace PosDashboard.Web.Modules.System
                       AND ac.Deleted = 0
                       AND iu.Active = 1
                       AND iu.BranchId = @BranchId
-                    ORDER BY c.CATEGORY_ORDERING, i.ITEM_NAME1",
+                    -- ITEM_UNIT_ID last, and ASC: the POS shows the FIRST unit that
+                    -- was added to an item on its card, which is the order the
+                    -- Edit Item panel lists them in. Anything else would make the
+                    -- shelf price depend on a sort the manager never chose.
+                    -- Grid order: the manager's ITEM_ORDERING first, name only as
+                    -- the tie-breaker. Items with no position sink to the end
+                    -- rather than jumping to the front on a NULL.
+                    ORDER BY c.CATEGORY_ORDERING,
+                             ISNULL(i.ITEM_ORDERING, 2147483647), i.ITEM_NAME1,
+                             iu.ITEM_UNIT_ID",
                     new { BranchId = resolvedBranchId })
                     .Select(s => new PosDtos.PosServiceDto(
                         ItemId: (int)s.ItemId,
@@ -192,6 +212,8 @@ namespace PosDashboard.Web.Modules.System
                         UnitId: (int)s.UnitId,
                         UnitNameEn: (string?)s.UnitNameEn ?? "",
                         UnitNameAr: (string?)s.UnitNameAr ?? (string?)s.UnitNameEn ?? "",
+                        UnitImageUrl: BuildImageUrl((string?)s.UnitDocumentName),
+                        IsQuick: Convert.ToInt32(s.Quick ?? 0) == 1,
                         Price: (decimal)(s.Price ?? 0m),
                         MinimumPrice: (decimal)(s.MinimumPrice ?? 0m),
                         DurationMinutes: (double)(s.DurationMinutes ?? 0d),
@@ -426,17 +448,41 @@ namespace PosDashboard.Web.Modules.System
                         staffAr = (string?)staff.ArabicName ?? "";
                     }
 
-                    var item = SqlMapper.Query(conn, @"
-                        SELECT iu.ITEM_ID, i.ITEM_NAME1, i.ITEM_NAME2,
-                               iu.UNIT_ID, iu.ITEM_UNIT_PRICE,
-                               CAST(iu.ITEM_UNIT_DURATION AS float) AS ITEM_UNIT_DURATION
-                        FROM dbo.ITEM_UNIT iu
-                        INNER JOIN dbo.ITEM i ON i.ITEM_ID = iu.ITEM_ID
-                        WHERE iu.ITEM_ID = @ItemId
-                          AND iu.UNIT_ID = @UnitId
-                          AND (i.ITEM_IS_ACTIVE = 1 OR i.ITEM_IS_ACTIVE IS NULL)
-                          AND iu.Active = 1",
-                        new { ItemId = line.ItemId, UnitId = line.UnitId }).FirstOrDefault();
+                    // Resolve the EXACT ITEM_UNIT row.
+                    //
+                    // When the client sends ItemUnitId we use it, because an item may
+                    // hold several ITEM_UNIT rows sharing one UNIT_ID (two "Session"
+                    // prices with different durations, say) and ItemId+UnitId would
+                    // silently pick whichever came first — charging the wrong price.
+                    // ItemUnitId is still verified to belong to the item in the
+                    // request, so it can never be used to sell a different service.
+                    var item = line.ItemUnitId.HasValue && line.ItemUnitId.Value > 0
+                        ? SqlMapper.Query(conn, @"
+                            SELECT iu.ITEM_UNIT_ID, iu.ITEM_ID, i.ITEM_NAME1, i.ITEM_NAME2,
+                                   iu.UNIT_ID, iu.ITEM_UNIT_PRICE,
+                                   CAST(iu.ITEM_UNIT_DURATION AS float) AS ITEM_UNIT_DURATION
+                            FROM dbo.ITEM_UNIT iu
+                            INNER JOIN dbo.ITEM i ON i.ITEM_ID = iu.ITEM_ID
+                            WHERE iu.ITEM_UNIT_ID = @ItemUnitId
+                              AND iu.ITEM_ID = @ItemId
+                              AND (i.ITEM_IS_ACTIVE = 1 OR i.ITEM_IS_ACTIVE IS NULL)
+                              AND iu.Active = 1",
+                            new { ItemUnitId = line.ItemUnitId.Value, ItemId = line.ItemId }).FirstOrDefault()
+                        // Legacy path: no ItemUnitId (older client). Deterministic
+                        // ordering so the same request always resolves the same row.
+                        : SqlMapper.Query(conn, @"
+                            SELECT TOP 1 iu.ITEM_UNIT_ID, iu.ITEM_ID, i.ITEM_NAME1, i.ITEM_NAME2,
+                                   iu.UNIT_ID, iu.ITEM_UNIT_PRICE,
+                                   CAST(iu.ITEM_UNIT_DURATION AS float) AS ITEM_UNIT_DURATION
+                            FROM dbo.ITEM_UNIT iu
+                            INNER JOIN dbo.ITEM i ON i.ITEM_ID = iu.ITEM_ID
+                            WHERE iu.ITEM_ID = @ItemId
+                              AND iu.UNIT_ID = @UnitId
+                              AND (i.ITEM_IS_ACTIVE = 1 OR i.ITEM_IS_ACTIVE IS NULL)
+                              AND iu.Active = 1
+                            ORDER BY iu.ITEM_UNIT_ID",
+                            new { ItemId = line.ItemId, UnitId = line.UnitId }).FirstOrDefault();
+
                     if (item == null) return FailCheckout($"Line #{i + 1}: item/unit not found or not active");
 
                     int duration = ResolveDuration(line.DurationMinutes, (double?)item.ITEM_UNIT_DURATION, slot);
@@ -445,34 +491,48 @@ namespace PosDashboard.Web.Modules.System
                         ? Math.Max(0m, line.UnitPriceOverride.Value)
                         : masterPrice;
 
-                    // Sequential, off-calendar times (kept valid; never crosses midnight).
-                    var start = cursor;
-                    var end = start + TimeSpan.FromMinutes(duration);
-                    if (end >= TimeSpan.FromDays(1))
-                    {
-                        start = TimeSpan.FromHours(startHour);
-                        end = start + TimeSpan.FromMinutes(duration);
-                    }
-                    cursor = end;
+                    // QUANTITY: a line of qty N becomes N independent service instances.
+                    // They are NOT merged into one row with a Quantity column, because a
+                    // POS service instance is the unit of work here: each one gets its own
+                    // appointment, its own printable label and therefore its own staff
+                    // member. Folding them together happens only when the receipt is READ.
+                    int qty = line.Quantity <= 0 ? 1 : line.Quantity;
+                    if (qty > MaxLineQuantity)
+                        return FailCheckout($"Line #{i + 1}: quantity {qty} exceeds the maximum of {MaxLineQuantity}");
+                    if (resolved.Count + qty > MaxTicketLines)
+                        return FailCheckout($"A single ticket cannot hold more than {MaxTicketLines} services");
 
-                    resolved.Add(new ResolvedLine
+                    for (int q = 0; q < qty; q++)
                     {
-                        Index = i,
-                        ItemId = line.ItemId,
-                        UnitId = line.UnitId,
-                        StaffId = lineStaffId,
-                        ItemEnName = (string?)item.ITEM_NAME1 ?? "",
-                        ItemArName = (string?)item.ITEM_NAME2 ?? "",
-                        StaffEnName = staffEn,
-                        StaffArName = staffAr,
-                        DurationMinutes = duration,
-                        UnitPrice = masterPrice,
-                        SalePrice = salePrice,
-                        OriginalUnitPrice = salePrice,   // pre-ticket-discount (override ?? master)
-                        StartTime = start,
-                        EndTime = end,
-                        Notes = string.IsNullOrWhiteSpace(line.Notes) ? null : line.Notes.Trim()
-                    });
+                        // Sequential, off-calendar times (kept valid; never crosses midnight).
+                        var start = cursor;
+                        var end = start + TimeSpan.FromMinutes(duration);
+                        if (end >= TimeSpan.FromDays(1))
+                        {
+                            start = TimeSpan.FromHours(startHour);
+                            end = start + TimeSpan.FromMinutes(duration);
+                        }
+                        cursor = end;
+
+                        resolved.Add(new ResolvedLine
+                        {
+                            Index = resolved.Count,
+                            ItemId = line.ItemId,
+                            UnitId = (int)item.UNIT_ID,   // from the resolved row, not the request
+                            StaffId = lineStaffId,
+                            ItemEnName = (string?)item.ITEM_NAME1 ?? "",
+                            ItemArName = (string?)item.ITEM_NAME2 ?? "",
+                            StaffEnName = staffEn,
+                            StaffArName = staffAr,
+                            DurationMinutes = duration,
+                            UnitPrice = masterPrice,
+                            SalePrice = salePrice,
+                            OriginalUnitPrice = salePrice,   // pre-ticket-discount (override ?? master)
+                            StartTime = start,
+                            EndTime = end,
+                            Notes = string.IsNullOrWhiteSpace(line.Notes) ? null : line.Notes.Trim()
+                        });
+                    }
                 }
 
                 // -------- Resolve PACKAGE (offer) lines --------
@@ -1257,14 +1317,21 @@ namespace PosDashboard.Web.Modules.System
                     .Select(v => int.TryParse(v, out var n) ? n : 3)
                     .DefaultIfEmpty(3).First();
 
-                var lines = SqlMapper.Query(conn, @"
+                // One row per SOLD INSTANCE comes out of the database; the receipt
+                // folds identical instances together below.
+                var rawLines = SqlMapper.Query(conn, @"
                     SELECT
                         ail.Id            AS Id,
                         ail.AppointmentId AS AppointmentId,
                         ail.ItemId        AS ItemId,
+                        ail.UnitId        AS UnitId,
                         ail.StaffId       AS StaffId,
                         i.ITEM_NAME1      AS ItemName,
                         i.ITEM_NAME2      AS ItemNameAr,
+                        u.UNIT_NAME1      AS UnitName,
+                        u.UNIT_NAME2      AS UnitNameAr,
+                        ISNULL(u.QUICK,0) AS Quick,
+                        ISNULL(ail.DurationMinutes, 0) AS DurationMinutes,
                         s.EnglishName     AS StaffName,
                         s.ArabicName      AS StaffNameAr,
                         ail.DiscountedUnitPrice AS UnitPrice,
@@ -1275,11 +1342,19 @@ namespace PosDashboard.Web.Modules.System
                         ail.PackageGroupId   AS PackageGroupId
                     FROM dbo.AppointmentInvoiceLines ail
                     INNER JOIN dbo.ITEM  i ON i.ITEM_ID = ail.ItemId
+                    LEFT  JOIN dbo.UNIT  u ON u.UNIT_ID = ail.UnitId
                     LEFT  JOIN dbo.STAFF s ON s.Id      = ail.StaffId
                     WHERE ail.InvoiceId = @InvoiceId AND ISNULL(ail.IsRefunded, 0) = 0
                     ORDER BY ail.Id",
-                    new { InvoiceId = invoiceId })
-                    .Select(l => new PosDtos.PosReceiptLineDto(
+                    new { InvoiceId = invoiceId }).ToList();
+
+                // One strongly-typed DTO per instance (Quantity = 1 for now), so the
+                // folding below runs over real types instead of dynamic rows.
+                var instanceLines = new List<PosDtos.PosReceiptLineDto>(rawLines.Count);
+                foreach (var l in rawLines)
+                {
+                    int lineUnitId = (l.UnitId == null || l.UnitId is DBNull) ? 0 : (int)l.UnitId;
+                    instanceLines.Add(new PosDtos.PosReceiptLineDto(
                         Id: (int?)l.Id,
                         AppointmentId: (int)l.AppointmentId,
                         ItemId: (int)l.ItemId,
@@ -1294,7 +1369,53 @@ namespace PosDashboard.Web.Modules.System
                         PackageOfferId: (int?)l.PackageOfferId,
                         PackageOfferName: (string?)l.PackageOfferName,
                         PackageGroupId: (Guid?)l.PackageGroupId,
-                        OriginalUnitPrice: (decimal)l.OriginalUnitPrice))
+                        OriginalUnitPrice: (decimal)l.OriginalUnitPrice,
+                        UnitId: lineUnitId,
+                        UnitName: (string?)l.UnitName ?? "",
+                        UnitNameAr: (string?)l.UnitNameAr ?? (string?)l.UnitName ?? "",
+                        DurationMinutes: Convert.ToInt32(l.DurationMinutes ?? 0),
+                        IsQuick: Convert.ToInt32(l.Quick ?? 0) == 1));
+                }
+
+                // -------- Fold identical instances into quantity rows --------
+                // Two instances are "the same product" only when the item, the UNIT,
+                // the staff, the charged price and the listed price all match, and
+                // they belong to the same package group. Anything else stays its own
+                // row: a haircut done by two different staff members is two lines on
+                // the receipt even though the customer bought "2 haircuts".
+                //
+                // A partial refund removes instances from the query above, so a 3x
+                // line that had one instance refunded correctly prints as 2x.
+                var lines = instanceLines
+                    .GroupBy(l => new
+                    {
+                        l.ItemId,
+                        l.UnitId,
+                        l.StaffId,
+                        l.UnitPrice,
+                        l.OriginalUnitPrice,
+                        // Two ITEM_UNIT rows may share a UNIT_ID and differ only in
+                        // duration (30 min vs 105 min). They are different products,
+                        // so they must not collapse into one receipt line.
+                        l.DurationMinutes,
+                        l.PackageGroupId
+                    })
+                    .Select(g =>
+                    {
+                        // The first instance owns the row's identifiers, so anything
+                        // that still needs a single appointment (the PDF link, the
+                        // label lookup) keeps working exactly as before.
+                        var first = g.OrderBy(x => x.Id ?? 0).First();
+                        return first with
+                        {
+                            Quantity = g.Count(),
+                            // Sum rather than multiply: the ticket discount is spread
+                            // per instance and the rounding remainder lands on one of
+                            // them, so unitPrice * qty could be a fils off the truth.
+                            TotalPrice = g.Sum(x => x.TotalPrice)
+                        };
+                    })
+                    .OrderBy(x => x.Id ?? 0)
                     .ToList();
 
                 var payments = SqlMapper.Query(conn, @"
@@ -1825,7 +1946,7 @@ namespace PosDashboard.Web.Modules.System
         {
             var sb = new StringBuilder();
             if (!string.IsNullOrWhiteSpace(header)) { sb.AppendLine(header); sb.AppendLine(); }
-            string services = string.Join(", ", lines.Select(l => l.ItemEnName));
+            string services = SummariseServices(lines, arabic: false, separator: ", ");
             sb.AppendLine("✅ Payment received successfully");
             sb.AppendLine("━━━━━━━━━━━━━━━━━━");
             sb.AppendLine($"Invoice: {invoiceNumber}");
@@ -1851,8 +1972,7 @@ namespace PosDashboard.Web.Modules.System
         {
             var sb = new StringBuilder();
             if (!string.IsNullOrWhiteSpace(header)) { sb.AppendLine(header); sb.AppendLine(); }
-            string services = string.Join("، ",
-                lines.Select(l => string.IsNullOrWhiteSpace(l.ItemArName) ? l.ItemEnName : l.ItemArName));
+            string services = SummariseServices(lines, arabic: true, separator: "، ");
             sb.AppendLine("✅ تم استلام الدفع بنجاح");
             sb.AppendLine("━━━━━━━━━━━━━━━━━━");
             sb.AppendLine($"الفاتورة: {invoiceNumber}");
@@ -1869,6 +1989,33 @@ namespace PosDashboard.Web.Modules.System
             sb.AppendLine("شكراً لكم!");
             if (!string.IsNullOrWhiteSpace(footer)) { sb.AppendLine(); sb.AppendLine(footer); }
             return sb.ToString();
+        }
+
+        /// <summary>
+        /// "Haircut x3, Manicure" — the sold instances collapsed into a readable
+        /// list. Without this a quantity of 3 repeats the same name three times in
+        /// the customer's WhatsApp receipt, which reads like a billing error.
+        /// Order of first appearance is preserved.
+        /// </summary>
+        private static string SummariseServices(
+            List<ResolvedLine> lines, bool arabic, string separator)
+        {
+            var order = new List<string>();
+            var counts = new Dictionary<string, int>();
+
+            foreach (var l in lines)
+            {
+                string name = arabic
+                    ? (string.IsNullOrWhiteSpace(l.ItemArName) ? l.ItemEnName : l.ItemArName)
+                    : (string.IsNullOrWhiteSpace(l.ItemEnName) ? l.ItemArName : l.ItemEnName);
+                if (string.IsNullOrWhiteSpace(name)) continue;
+
+                if (counts.ContainsKey(name)) counts[name]++;
+                else { counts[name] = 1; order.Add(name); }
+            }
+
+            return string.Join(separator,
+                order.Select(n => counts[n] > 1 ? $"{n} x{counts[n]}" : n));
         }
 
         private static string NormalizePhone(string phone)
@@ -1951,17 +2098,38 @@ namespace PosDashboard.Web.Modules.System
                     ORDER BY ail.Id",
                     new { InvoiceId = invoiceId }).ToList();
 
+                // Same folding rule as the receipt endpoint: identical instances
+                // (name, staff, unit price, package group) become one row with a
+                // quantity, so the printed PDF and the on-screen invoice agree.
                 foreach (var ln in lines)
                 {
+                    string itemName = (string)(ln.ItemEn ?? ln.ItemAr ?? "Service");
+                    string staffName = (string)(ln.StaffEn ?? ln.StaffAr ?? "—");
+                    decimal unitPrice = (decimal)ln.UnitPrice;
+                    Guid? pkgGroupId = ln.PackageGroupId == null || ln.PackageGroupId is DBNull
+                        ? (Guid?)null : (Guid)ln.PackageGroupId;
+
+                    var existing = pdfData.LineItems.FirstOrDefault(x =>
+                        x.ItemName == itemName &&
+                        x.StaffName == staffName &&
+                        x.UnitPrice == unitPrice &&
+                        x.PackageGroupId == pkgGroupId);
+
+                    if (existing != null)
+                    {
+                        existing.Quantity += 1;
+                        existing.TotalPrice += (decimal)ln.TotalPrice;
+                        continue;
+                    }
+
                     pdfData.LineItems.Add(new InvoiceLineData
                     {
-                        ItemName = (string)(ln.ItemEn ?? ln.ItemAr ?? "Service"),
-                        StaffName = (string)(ln.StaffEn ?? ln.StaffAr ?? "—"),
+                        ItemName = itemName,
+                        StaffName = staffName,
                         Quantity = 1,
-                        UnitPrice = (decimal)ln.UnitPrice,
+                        UnitPrice = unitPrice,
                         TotalPrice = (decimal)ln.TotalPrice,
-                        PackageGroupId = ln.PackageGroupId == null || ln.PackageGroupId is DBNull
-                            ? (Guid?)null : (Guid)ln.PackageGroupId,
+                        PackageGroupId = pkgGroupId,
                         PackageOfferName = ln.PackageOfferName == null || ln.PackageOfferName is DBNull
                             ? null : (string)ln.PackageOfferName
                     });
