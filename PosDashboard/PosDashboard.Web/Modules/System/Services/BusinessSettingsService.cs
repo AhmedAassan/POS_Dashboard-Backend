@@ -29,6 +29,17 @@ namespace PosDashboard.Web.Modules.System.Services
         public const string KeyDebtAllowSettlementDiscount = "debt.allowSettlementDiscount";
         public const string KeyDebtCustomerLimit = "debt.customerLimit";
 
+        // ---- POS service labels (un-staffed sales) ----
+        // Off  => the POS staff pickers, the "Assign labels" button and the
+        //         Service labels block on the invoice are all hidden.
+        // The default is ON so an install that never ran the seed script keeps
+        // behaving exactly as it did before this flag existed.
+        public const string KeyServiceLabelsEnabled = "pos.serviceLabelsEnabled";
+
+        /// <summary>The POS service-label flow. Missing row => enabled.</summary>
+        public static bool GetServiceLabelsEnabled(IDbConnection conn, int? branchId = null)
+            => GetBool(conn, KeyServiceLabelsEnabled, true, branchId);
+
         /// <summary>Raw value for one key (branch override wins over the global row).</summary>
         public static string? GetValue(IDbConnection conn, string key, int? branchId = null)
         {
