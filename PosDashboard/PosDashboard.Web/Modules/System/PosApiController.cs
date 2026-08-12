@@ -28,12 +28,14 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
+using PosDashboard.Web.Modules.System.Models;
 using PosDashboard.Web.Modules.System.Services;   // InvoicePdfData + InvoiceLineData + PdfInvoiceService
 using Serenity.Data;
 using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Diagnostics;
+using System.Globalization;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -41,8 +43,9 @@ using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
-using PosDtos = PosDashboard.Web.Modules.System.Models.PosDtos;
+using static PosDashboard.Web.Modules.System.Models.WhatsAppProviderDtos;
 using DeliveryDtos = PosDashboard.Web.Modules.System.Models.DeliveryDtos;
+using PosDtos = PosDashboard.Web.Modules.System.Models.PosDtos;
 
 namespace PosDashboard.Web.Modules.System
 {
@@ -56,6 +59,9 @@ namespace PosDashboard.Web.Modules.System
         private readonly IConfiguration _configuration;
         private const string EnjazatikUrl = "https://business.enjazatik.com/api/v1/send-message";
 
+        // The transport is a setting now, not a decision made here.
+        private readonly IWhatsAppSender sender;
+
         /// <summary>Ceiling for a single line's Quantity. A cashier who really needs
         /// more can add the item twice; without a ceiling one typo could insert
         /// thousands of appointments inside the checkout transaction.</summary>
@@ -68,11 +74,13 @@ namespace PosDashboard.Web.Modules.System
         public PosApiController(
             ISqlConnections sqlConnections,
             IHttpClientFactory httpClientFactory,
-            IConfiguration configuration)
+            IConfiguration configuration,
+            IWhatsAppSender sender)
         {
             this.sqlConnections = sqlConnections;
             this.httpClientFactory = httpClientFactory;
             _configuration = configuration;
+            this.sender = sender;
         }
 
         // =====================================================================
@@ -1203,13 +1211,15 @@ namespace PosDashboard.Web.Modules.System
 
                     // -------- WhatsApp (best-effort) --------
                     bool waSent = false; string? waErr = null;
+                    bool waQueued = false; string? waLink = null;
                     if (request.SendWhatsApp)
                     {
                         try
                         {
-                            (waSent, waErr) = await SendPosReceiptAsync(
+                            var waResult = await SendPosReceiptAsync(
                                 conn,
                                 appointmentId: leadApptId,
+                                customerId: (int)customer.CUSTOMER_ID,
                                 customerName: (string)customer.CUSTOMER_NAME,
                                 customerPhone: (string)customer.CUSTOMER_PHONE1,
                                 customerLang: (string)customer.Lang,
@@ -1218,6 +1228,11 @@ namespace PosDashboard.Web.Modules.System
                                 grandTotal: grandTotal, paidTotal: paidTotal,
                                 subTotal: subTotal, discountAmount: discountAmount,
                                 lines: resolved);
+
+                            waSent = waResult.Sent;
+                            waErr = waResult.Error;
+                            waQueued = waResult.AwaitingManualSend;
+                            waLink = waResult.WaLink;
                         }
                         catch (Exception ex) { waSent = false; waErr = $"Send failed: {ex.Message}"; }
                     }
@@ -1236,6 +1251,8 @@ namespace PosDashboard.Web.Modules.System
                         Currency: currency,
                         WhatsAppSent: waSent,
                         WhatsAppError: waErr,
+                        WhatsAppQueued: waQueued,
+                        WhatsAppLink: waLink,
                         InvoicePdfUrl: pdfUrl,
                         Labels: labels,
                         SubTotal: subTotal,
@@ -1900,57 +1917,74 @@ namespace PosDashboard.Web.Modules.System
             return $"{Request.Scheme}://{Request.Host}{path}";
         }
 
-        private async Task<(bool Sent, string? Error)> SendPosReceiptAsync(
-            IDbConnection conn, int appointmentId,
+        private async Task<WhatsAppSendResult> SendPosReceiptAsync(
+            IDbConnection conn, int appointmentId, int customerId,
             string customerName, string customerPhone, string customerLang,
             string currency, string currencyAr, string invoiceNumber,
             decimal grandTotal, decimal paidTotal, List<ResolvedLine> lines,
             decimal subTotal = 0m, decimal discountAmount = 0m)
         {
-            var config = SqlMapper.Query(conn, @"
-                SELECT TOP 1 HeaderText, FooterText, InstanceId, IsEnabled
-                FROM dbo.WHATSAPP_CONFIG ORDER BY Id").FirstOrDefault();
+            var waConfig = sender.LoadConfig(conn);
+            if (!waConfig.Enabled)
+                return WhatsAppSendResult.Disabled();
 
-            if (config == null || !(bool)config.IsEnabled)
-                return (false, "WhatsApp sending is disabled");
-
-            string header = (string?)config.HeaderText ?? "";
-            string footer = (string?)config.FooterText ?? "";
-            string instanceId = (string?)config.InstanceId ?? "51d2e384a1ef86b";
+            string header = waConfig.Header;
+            string footer = waConfig.Footer;
             string pdfUrl = $"{Request.Scheme}://{Request.Host}/api/myfatoorah/invoice-pdf/{appointmentId}";
 
+            // Read after the transaction committed, so the balance printed is the
+            // one left AFTER this sale — the number the customer would see if they
+            // checked right now, not the one from a second ago.
+            //
+            // Same loader the invoice dialog uses, so the receipt and the screen can
+            // never disagree. It picks the customer's most active wallet; a customer
+            // holding several would see that one rather than whichever was debited.
+            WalletDtos.InvoiceWalletInfoDto? wallet = null;
+            try { wallet = WalletApiController.LoadInvoiceWalletInfo(conn, customerId); }
+            catch (Exception ex) { Debug.WriteLine($"[POS receipt wallet] {ex.Message}"); }
+
             string message = customerLang == "en"
-                ? BuildReceiptEn(header, footer, invoiceNumber, lines, grandTotal, paidTotal, currency, pdfUrl, subTotal, discountAmount)
-                : BuildReceiptAr(header, footer, invoiceNumber, lines, grandTotal, paidTotal, currencyAr, pdfUrl, subTotal, discountAmount);
+                ? BuildReceiptEn(header, footer, invoiceNumber, lines, grandTotal, paidTotal, currency, pdfUrl, subTotal, discountAmount, wallet)
+                : BuildReceiptAr(header, footer, invoiceNumber, lines, grandTotal, paidTotal, currencyAr, pdfUrl, subTotal, discountAmount, wallet);
 
-            string phone = NormalizePhone(customerPhone);
-
-            var client = httpClientFactory.CreateClient();
-            client.DefaultRequestHeaders.Authorization =
-                new AuthenticationHeaderValue("Bearer", _configuration["WhatsApp:ApiKey"] ?? "");
-
-            var payload = new { instance_id = instanceId, message, number = phone };
-            var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
-
-            var resp = await client.PostAsync(EnjazatikUrl, content);
-            if (resp.IsSuccessStatusCode) return (true, null);
-
-            var body = await resp.Content.ReadAsStringAsync();
-            return (false, $"API error: {resp.StatusCode} — {body}");
+            // Raw number in: the service applies the configured country code. The
+            // local NormalizePhone still hard-codes 965 and would break a foreign
+            // number before the service ever saw it.
+            return await sender.SendAsync(conn, customerPhone, message,
+                new WhatsAppContext(
+                    MessageType: WhatsAppMessageTypes.PosReceipt,
+                    ReferenceId: invoiceNumber,
+                    CustomerName: customerName,
+                    Lang: customerLang),
+                requiresRealtime: false,
+                config: waConfig);
         }
+
+        /// <summary>
+        /// 8/10/2026 — month/day/year, matching the format requested for the receipt.
+        ///
+        /// InvariantCulture is not decoration here: under an Arabic thread culture
+        /// the default formatter can switch to Arabic-Indic digits or a Hijri
+        /// calendar, and the customer would read a date that is not the one stored.
+        /// For day/month/year instead, change the pattern to "d/M/yyyy" — this is
+        /// the only place it is written.
+        /// </summary>
+        private static string FormatReceiptDate(DateTime date) =>
+            date.ToString("M/d/yyyy", CultureInfo.InvariantCulture);
 
         private static string BuildReceiptEn(
             string header, string footer, string invoiceNumber, List<ResolvedLine> lines,
             decimal total, decimal paid, string currency, string pdfUrl,
-            decimal subTotal = 0m, decimal discountAmount = 0m)
+            decimal subTotal = 0m, decimal discountAmount = 0m,
+            WalletDtos.InvoiceWalletInfoDto? wallet = null)
         {
             var sb = new StringBuilder();
             if (!string.IsNullOrWhiteSpace(header)) { sb.AppendLine(header); sb.AppendLine(); }
             string services = SummariseServices(lines, arabic: false, separator: ", ");
-            sb.AppendLine("✅ Payment received successfully");
+            sb.AppendLine("✅ *New invoice*");
             sb.AppendLine("━━━━━━━━━━━━━━━━━━");
             sb.AppendLine($"Invoice: {invoiceNumber}");
-            sb.AppendLine($"Services: {services}");
+            //sb.AppendLine($"Services: {services}");
             if (discountAmount > 0m)
             {
                 sb.AppendLine($"Subtotal: {currency} {subTotal:F2}");
@@ -1959,6 +1993,17 @@ namespace PosDashboard.Web.Modules.System
             sb.AppendLine($"Total: {currency} {total:F2}");
             sb.AppendLine($"Paid: {currency} {paid:F2}");
             sb.AppendLine($"📄 Invoice: {pdfUrl}");
+
+            // A closed or expired wallet is not news the customer can act on, and
+            // printing a stale balance next to a fresh invoice invites a phone call.
+            if (wallet != null && !wallet.IsClosed && !wallet.IsExpired)
+            {
+                sb.AppendLine("━━━━━━━━━━━━━━━━━━");
+                sb.AppendLine($"👛 Wallet: {wallet.SubTypeName}");
+                sb.AppendLine($"💰 Balance: {currency} {wallet.CurrentBalance:F2}");
+                sb.AppendLine($"📅 Valid until: {FormatReceiptDate(wallet.EndDate)}");
+            }
+
             sb.AppendLine("━━━━━━━━━━━━━━━━━━");
             sb.AppendLine("Thank you!");
             if (!string.IsNullOrWhiteSpace(footer)) { sb.AppendLine(); sb.AppendLine(footer); }
@@ -1968,15 +2013,16 @@ namespace PosDashboard.Web.Modules.System
         private static string BuildReceiptAr(
             string header, string footer, string invoiceNumber, List<ResolvedLine> lines,
             decimal total, decimal paid, string currencyAr, string pdfUrl,
-            decimal subTotal = 0m, decimal discountAmount = 0m)
+            decimal subTotal = 0m, decimal discountAmount = 0m,
+            WalletDtos.InvoiceWalletInfoDto? wallet = null)
         {
             var sb = new StringBuilder();
             if (!string.IsNullOrWhiteSpace(header)) { sb.AppendLine(header); sb.AppendLine(); }
             string services = SummariseServices(lines, arabic: true, separator: "، ");
-            sb.AppendLine("✅ تم استلام الدفع بنجاح");
+            sb.AppendLine("✅ *فاتورة جديدة*");
             sb.AppendLine("━━━━━━━━━━━━━━━━━━");
             sb.AppendLine($"الفاتورة: {invoiceNumber}");
-            sb.AppendLine($"الخدمات: {services}");
+            //sb.AppendLine($"الخدمات: {services}");
             if (discountAmount > 0m)
             {
                 sb.AppendLine($"الإجمالي قبل الخصم: {subTotal:F2} {currencyAr}");
@@ -1985,6 +2031,15 @@ namespace PosDashboard.Web.Modules.System
             sb.AppendLine($"الإجمالي: {total:F2} {currencyAr}");
             sb.AppendLine($"المدفوع: {paid:F2} {currencyAr}");
             sb.AppendLine($"📄 الفاتورة: {pdfUrl}");
+
+            if (wallet != null && !wallet.IsClosed && !wallet.IsExpired)
+            {
+                sb.AppendLine("━━━━━━━━━━━━━━━━━━");
+                sb.AppendLine($"👛 المحفظة: {wallet.SubTypeName}");
+                sb.AppendLine($"💰 الرصيد المتبقي: {wallet.CurrentBalance:F2} {currencyAr}");
+                sb.AppendLine($"📅 صالحة حتى: {FormatReceiptDate(wallet.EndDate)}");
+            }
+
             sb.AppendLine("━━━━━━━━━━━━━━━━━━");
             sb.AppendLine("شكراً لكم!");
             if (!string.IsNullOrWhiteSpace(footer)) { sb.AppendLine(); sb.AppendLine(footer); }

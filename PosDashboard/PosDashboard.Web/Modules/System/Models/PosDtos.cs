@@ -316,7 +316,12 @@ namespace PosDashboard.Web.Modules.System.Models
             decimal DeliveryCharge = 0m,
             DeliveryDtos.InvoiceDeliveryDto? Delivery = null,
             // Deferred (debt) sale: nothing was collected at the counter.
-            bool IsDeferred = false
+            bool IsDeferred = false,
+            // WhatsApp, when the "Open WhatsApp" method is selected: the message is
+            // not sent, it is queued. WhatsAppSent stays true because it is on its
+            // way — these two say it still needs a person, and where to find it.
+            bool WhatsAppQueued = false,
+            string? WhatsAppLink = null
         );
 
         // =====================================================================

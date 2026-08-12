@@ -4,7 +4,9 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
+using PosDashboard.Web.Modules.System.Models;
 using PosDashboard.Web.Modules.System.Services;   // InvoicePdfData + PdfInvoiceService
+using PosDashboard.Web.Modules.System.Services;
 using Serenity.Data;
 using System;
 using System.Collections.Generic;
@@ -17,6 +19,7 @@ using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
+using static PosDashboard.Web.Modules.System.Models.WhatsAppProviderDtos;
 using AppointmentDtoModel = PosDashboard.Web.Modules.System.Models.AppointmentDtos.AppointmentDto;
 using NewSaleDtos = PosDashboard.Web.Modules.System.Models.NewSaleDtos;
 
@@ -34,14 +37,19 @@ namespace PosDashboard.Web.Modules.System
 
         private static readonly string[] ValidServiceTypes = { "SALON", "HOME" };
 
+        // The transport is a setting now, not a decision made here.
+        private readonly IWhatsAppSender sender;
+
         public NewSaleApiController(
             ISqlConnections sqlConnections,
             IHttpClientFactory httpClientFactory,
-            IConfiguration configuration)
+            IConfiguration configuration,
+            IWhatsAppSender sender)
         {
             this.sqlConnections = sqlConnections;
             this.httpClientFactory = httpClientFactory;
             _configuration = configuration;
+            this.sender = sender;
         }
 
         // =========================================================================
@@ -883,16 +891,12 @@ namespace PosDashboard.Web.Modules.System
             decimal grandTotal, decimal paidTotal, decimal walletAmount,
             List<ResolvedLine> lines)
         {
-            var config = SqlMapper.Query(conn, @"
-                SELECT TOP 1 HeaderText, FooterText, InstanceId, IsEnabled
-                FROM dbo.WHATSAPP_CONFIG ORDER BY Id").FirstOrDefault();
-
-            if (config == null || !(bool)config.IsEnabled)
+            var waConfig = sender.LoadConfig(conn);
+            if (!waConfig.Enabled)
                 return (false, "WhatsApp sending is disabled");
 
-            string header = (string?)config.HeaderText ?? "";
-            string footer = (string?)config.FooterText ?? "";
-            string instanceId = (string?)config.InstanceId ?? "51d2e384a1ef86b";
+            string header = waConfig.Header;
+            string footer = waConfig.Footer;
             string pdfUrl = $"{Request.Scheme}://{Request.Host}/api/myfatoorah/invoice-pdf/{appointmentId}";
             string message = customerLang == "en"
             ? BuildSaleMessageEn(header, footer, customerName, saleDate,
@@ -902,22 +906,17 @@ namespace PosDashboard.Web.Modules.System
                                  invoiceNumber, lines, grandTotal,
                                  paidTotal, walletAmount, currencyAr, pdfUrl);
 
-            string phone = NormalizePhone(customerPhone);
+            // Raw number in — the service applies the configured country code.
+            var result = await sender.SendAsync(conn, customerPhone, message,
+                new WhatsAppContext(
+                    MessageType: WhatsAppMessageTypes.SaleConfirmation,
+                    ReferenceId: invoiceNumber,
+                    CustomerName: customerName,
+                    Lang: customerLang),
+                requiresRealtime: false,
+                config: waConfig);
 
-            var client = httpClientFactory.CreateClient();
-            client.DefaultRequestHeaders.Authorization =
-                new AuthenticationHeaderValue(
-                    "Bearer", _configuration["WhatsApp:ApiKey"] ?? "");
-
-            var payload = new { instance_id = instanceId, message, number = phone };
-            var json = JsonSerializer.Serialize(payload);
-            var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-            var resp = await client.PostAsync(EnjazatikUrl, content);
-            if (resp.IsSuccessStatusCode) return (true, null);
-
-            var body = await resp.Content.ReadAsStringAsync();
-            return (false, $"API error: {resp.StatusCode} — {body}");
+            return (result.Sent, result.Error);
         }
 
         private static string BuildSaleMessageEn(

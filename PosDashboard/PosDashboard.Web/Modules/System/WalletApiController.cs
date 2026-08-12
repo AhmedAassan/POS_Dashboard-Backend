@@ -21,6 +21,8 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
+using PosDashboard.Web.Modules.System.Models;
+using PosDashboard.Web.Modules.System.Services;
 using Serenity.Data;
 using System;
 using System.Collections.Generic;
@@ -33,6 +35,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using static PosDashboard.Web.Modules.System.Models.WalletDtos;
+using static PosDashboard.Web.Modules.System.Models.WhatsAppProviderDtos;
 
 namespace PosDashboard.Web.Modules.System
 {
@@ -44,10 +47,15 @@ namespace PosDashboard.Web.Modules.System
         private readonly ISqlConnections sqlConnections;
         private readonly IConfiguration _configuration;
 
-        public WalletApiController(ISqlConnections sqlConnections, IConfiguration configuration)
+        // The transport is a setting now, not a decision made here.
+        private readonly IWhatsAppSender sender;
+
+        public WalletApiController(ISqlConnections sqlConnections, IConfiguration configuration,
+            IWhatsAppSender sender)
         {
             this.sqlConnections = sqlConnections;
             _configuration = configuration;
+            this.sender = sender;
         }
 
         private int GetCurrentUserId()
@@ -1533,7 +1541,6 @@ namespace PosDashboard.Web.Modules.System
 
             string header = (string?)config.HeaderText ?? "";
             string footer = (string?)config.FooterText ?? "";
-            string instanceId = (string?)config.InstanceId ?? "51d2e384a1ef86b";
             string lang = (string)sub.CustomerLang;
             string currency = lang == "en"
                 ? ((string?)sub.EnglishCurrencyName ?? "KWD")
@@ -1611,23 +1618,22 @@ namespace PosDashboard.Web.Modules.System
                 message = sb.ToString();
             }
 
-            try
-            {
-                var client = httpClientFactory.CreateClient();
-                client.DefaultRequestHeaders.Authorization =
-                    new AuthenticationHeaderValue("Bearer", _configuration["WhatsApp:ApiKey"] ?? "");
+            // Raw number in — the service applies the configured country code.
+            var result = await sender.SendAsync(conn, (string)sub.CustomerPhone, message,
+                new WhatsAppContext(
+                    MessageType: WhatsAppMessageTypes.WalletCreated,
+                    ReferenceId: subscriptionId.ToString(),
+                    CustomerName: customerName,
+                    Lang: lang));
 
-                var payload = new { instance_id = instanceId, message, number = phone };
-                var json = JsonSerializer.Serialize(payload);
-                var content = new StringContent(json, Encoding.UTF8, "application/json");
-                await client.PostAsync("https://business.enjazatik.com/api/v1/send-message", content);
-
-                return Ok(new ApiResult<object>(true, null, new { Sent = true }));
-            }
-            catch (Exception ex)
+            // Queued counts as sent: the message is on its way, through a person.
+            return Ok(new ApiResult<object>(true, null, new
             {
-                return Ok(new ApiResult<object>(true, null, new { Sent = false, Error = ex.Message }));
-            }
+                Sent = result.Sent,
+                Error = result.Error,
+                Queued = result.AwaitingManualSend,
+                Link = result.WaLink
+            }));
         }
 
         private static string NormalizePhone(string phone)

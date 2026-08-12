@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
+using PosDashboard.Web.Modules.System.Models;
 using PosDashboard.Web.Modules.System.Services;
 using Serenity.Data;
 using System;
@@ -18,6 +19,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using static PosDashboard.Web.Modules.System.Models.MyFatoorahDtos;
+using static PosDashboard.Web.Modules.System.Models.WhatsAppProviderDtos;
 
 namespace PosDashboard.Web.Modules.System
 {
@@ -29,14 +31,19 @@ namespace PosDashboard.Web.Modules.System
         private readonly IHttpClientFactory httpClientFactory;
         private readonly IConfiguration configuration;
 
+        // The transport is a setting now, not a decision made here.
+        private readonly IWhatsAppSender sender;
+
         public MyFatoorahApiController(
             ISqlConnections sqlConnections,
             IHttpClientFactory httpClientFactory,
-            IConfiguration configuration)
+            IConfiguration configuration,
+            IWhatsAppSender sender)
         {
             this.sqlConnections = sqlConnections;
             this.httpClientFactory = httpClientFactory;
             this.configuration = configuration;
+            this.sender = sender;
         }
 
         // =============================================
@@ -900,7 +907,7 @@ namespace PosDashboard.Web.Modules.System
                 if (claimed == 0) return;
                 string customerLang = (string)info.CustomerLang;
                 string customerPhone = NormalizePhone((string)info.CustomerPhone);
-                string instanceId = (string?)waConfig.InstanceId ?? "51d2e384a1ef86b";
+                // instanceId is no longer read here — the service owns the transport.
                 string pdfUrl = (string?)info.PdfInvoiceUrl ?? "";
                 decimal paidAmount = (decimal)info.Amount;
                 decimal totalPrice = (decimal)info.TotalPrice;
@@ -962,23 +969,10 @@ namespace PosDashboard.Web.Modules.System
                 }
                 string message = sb.ToString();
 
-                var httpClient = httpClientFactory.CreateClient();
-                string waToken = configuration["WhatsApp:ApiKey"] ?? "";
-                httpClient.DefaultRequestHeaders.Authorization =
-                    new AuthenticationHeaderValue("Bearer", waToken);
-
-                var payload = new
-                {
-                    instance_id = instanceId,
-                    message = message,
-                    number = customerPhone
-                };
-
-                var json = JsonSerializer.Serialize(payload);
-                var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-                await httpClient.PostAsync(
-                    "https://business.enjazatik.com/api/v1/send-message", content);
+                await sender.SendAsync(conn, customerPhone, message,
+                    new WhatsAppContext(
+                        MessageType: WhatsAppMessageTypes.SaleConfirmation,
+                        ReferenceId: appointmentId.ToString()));
 
 
             }
@@ -1035,18 +1029,12 @@ namespace PosDashboard.Web.Modules.System
             sb.AppendLine($"السعر: {((decimal)apt.TotalPrice):F2} د.ك");
             if (notes != "") sb.AppendLine($"ملاحظات: {notes}");
 
-            string phone = NormalizePhone(staffMobile);
-            var client = httpClientFactory.CreateClient();
-            client.DefaultRequestHeaders.Authorization =
-                new AuthenticationHeaderValue("Bearer", configuration["WhatsApp:ApiKey"] ?? "");
-            var payload = new
-            {
-                instance_id = (string?)waConfig.InstanceId ?? "51d2e384a1ef86b",
-                message = sb.ToString(),
-                number = phone
-            };
-            var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
-            await client.PostAsync("https://business.enjazatik.com/api/v1/send-message", content);
+            // Goes to a staff member, not a customer — but it travels the same way,
+            // so it honours the same setting and lands in the same delivery log.
+            await sender.SendAsync(conn, staffMobile, sb.ToString(),
+                new WhatsAppContext(
+                    MessageType: "staff.booking",
+                    ReferenceId: appointmentId.ToString()));
         }
         private static string NormalizePhone(string phone)
         {

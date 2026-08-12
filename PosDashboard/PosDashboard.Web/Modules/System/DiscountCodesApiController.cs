@@ -32,6 +32,8 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
+using PosDashboard.Web.Modules.System.Models;
+using PosDashboard.Web.Modules.System.Services;
 using Serenity.Data;
 using System;
 using System.Collections.Generic;
@@ -43,6 +45,7 @@ using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
+using static PosDashboard.Web.Modules.System.Models.WhatsAppProviderDtos;
 using Dtos = PosDashboard.Web.Modules.System.Models.DiscountCodeDtos;
 
 namespace PosDashboard.Web.Modules.System
@@ -57,14 +60,19 @@ namespace PosDashboard.Web.Modules.System
         private readonly IConfiguration _configuration;
         private const string EnjazatikUrl = "https://business.enjazatik.com/api/v1/send-message";
 
+        // The transport is a setting now, not a decision made here.
+        private readonly IWhatsAppSender sender;
+
         public DiscountCodesApiController(
             ISqlConnections sqlConnections,
             IHttpClientFactory httpClientFactory,
-            IConfiguration configuration)
+            IConfiguration configuration,
+            IWhatsAppSender sender)
         {
             this.sqlConnections = sqlConnections;
             this.httpClientFactory = httpClientFactory;
             _configuration = configuration;
+            this.sender = sender;
         }
 
         // =====================================================================
@@ -772,27 +780,21 @@ namespace PosDashboard.Web.Modules.System
 
             string header = (string?)config.HeaderText ?? "";
             string footer = (string?)config.FooterText ?? "";
-            string instanceId = (string?)config.InstanceId ?? "51d2e384a1ef86b";
 
             string message = customerLang == "en"
                 ? BuildCodeMessageEn(header, footer, customerName, code, type, amount, expiresAt)
                 : BuildCodeMessageAr(header, footer, customerName, code, type, amount, expiresAt);
 
-            string phone = NormalizePhone(customerPhone);
-            if (phone.Length == 0) return (false, "Customer has no phone number");
+            // Raw number in — the service applies the configured country code and
+            // reports an unusable one rather than silently sending nowhere.
+            var result = await sender.SendAsync(conn, customerPhone, message,
+                new WhatsAppContext(
+                    MessageType: WhatsAppMessageTypes.DiscountCode,
+                    ReferenceId: code,
+                    CustomerName: customerName,
+                    Lang: customerLang));
 
-            var client = httpClientFactory.CreateClient();
-            client.DefaultRequestHeaders.Authorization =
-                new AuthenticationHeaderValue("Bearer", _configuration["WhatsApp:ApiKey"] ?? "");
-
-            var payload = new { instance_id = instanceId, message, number = phone };
-            var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
-
-            var resp = await client.PostAsync(EnjazatikUrl, content);
-            if (resp.IsSuccessStatusCode) return (true, null);
-
-            var body = await resp.Content.ReadAsStringAsync();
-            return (false, $"API error: {resp.StatusCode} — {body}");
+            return (result.Sent, result.Error);
         }
 
         private static string BuildCodeMessageEn(

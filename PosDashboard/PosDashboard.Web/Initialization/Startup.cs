@@ -207,7 +207,7 @@ namespace PosDashboard
             //new
             services.AddScoped<JwtTokenService>();
             services.AddHttpClient();
-
+            services.AddSingleton<IWhatsAppSender, WhatsAppSenderService>();
 
             services.AddControllers()
             .AddJsonOptions(x =>

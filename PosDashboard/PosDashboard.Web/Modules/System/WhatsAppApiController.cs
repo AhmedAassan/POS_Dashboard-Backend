@@ -4,6 +4,8 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
+using PosDashboard.Web.Modules.System.Models;
+using PosDashboard.Web.Modules.System.Services;
 using Serenity.Data;
 using System;
 using System.Collections.Generic;
@@ -15,6 +17,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using static PosDashboard.Web.Modules.System.Models.WhatsAppDtos;
+using static PosDashboard.Web.Modules.System.Models.WhatsAppProviderDtos;
 
 namespace PosDashboard.Web.Modules.System
 {
@@ -32,15 +35,30 @@ namespace PosDashboard.Web.Modules.System
 
         private readonly IConfiguration _configuration;
 
+        // Every send in this file now goes through here. The transport — Enjazatik,
+        // Cartley, or a queued link for a person to send by hand — is chosen from
+        // settings rather than decided at the call site.
+        private readonly IWhatsAppSender sender;
+
         public WhatsAppApiController(
             ISqlConnections sqlConnections,
             IHttpClientFactory httpClientFactory,
-            IConfiguration configuration)
+            IConfiguration configuration,
+            IWhatsAppSender sender)
         {
             this.sqlConnections = sqlConnections;
             this.httpClientFactory = httpClientFactory;
             _configuration = configuration;
+            this.sender = sender;
         }
+
+        /// <summary>
+        /// Sent stays true when a message is queued for manual sending — it is on
+        /// its way, it is just travelling through a person. Callers that only read
+        /// Sent therefore keep behaving exactly as they did.
+        /// </summary>
+        private static SendWhatsAppResponse Wrap(WhatsAppSendResult r) =>
+            new(r.Sent, r.Phone, r.Error, r.AwaitingManualSend, r.WaLink, r.OutboxId);
 
         // =============================================
         // GET /api/whatsapp/template
@@ -222,7 +240,6 @@ namespace PosDashboard.Web.Modules.System
 
             string header = (string?)config.HeaderText ?? "";
             string footer = (string?)config.FooterText ?? "";
-            string instanceId = (string?)config.InstanceId ?? "51d2e384a1ef86b";
             string customerLang = (string)apt.CustomerLang;
 
             string? packageName = customerLang == "en"
@@ -286,44 +303,16 @@ namespace PosDashboard.Web.Modules.System
                 );
             }
 
-            var phone = NormalizePhone((string)apt.CustomerPhone);
+            // The raw number goes in deliberately: the service normalises with
+            // the configured country code, while the local helper still assumes
+            // 965 and would corrupt a foreign number before it ever got here.
+            var result = await sender.SendAsync(conn, (string)apt.CustomerPhone, message,
+                new WhatsAppContext(
+                    MessageType: WhatsAppMessageTypes.AppointmentConfirmation,
+                    ReferenceId: appointmentId.ToString(),
+                    CustomerName: (string?)apt.CustomerName));
 
-            try
-            {
-                var client = httpClientFactory.CreateClient();
-                client.DefaultRequestHeaders.Authorization =
-                    new AuthenticationHeaderValue("Bearer", _configuration["WhatsApp:ApiKey"] ?? "");
-
-                var payload = new
-                {
-                    instance_id = instanceId,
-                    message = message,
-                    number = phone
-                };
-
-                var json = JsonSerializer.Serialize(payload);
-                var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-                var response = await client.PostAsync(EnjazatikUrl, content);
-                var responseBody = await response.Content.ReadAsStringAsync();
-
-                if (response.IsSuccessStatusCode)
-                {
-                    return Ok(new ApiResult<SendWhatsAppResponse>(true, null,
-                        new SendWhatsAppResponse(true, phone, null)));
-                }
-                else
-                {
-                    return Ok(new ApiResult<SendWhatsAppResponse>(true, null,
-                        new SendWhatsAppResponse(false, phone,
-                            $"API error: {response.StatusCode} — {responseBody}")));
-                }
-            }
-            catch (Exception ex)
-            {
-                return Ok(new ApiResult<SendWhatsAppResponse>(true, null,
-                    new SendWhatsAppResponse(false, phone, $"Send failed: {ex.Message}")));
-            }
+            return Ok(new ApiResult<SendWhatsAppResponse>(true, null, Wrap(result)));
         }
 
         // POST /api/whatsapp/send-payment-link
@@ -379,7 +368,6 @@ namespace PosDashboard.Web.Modules.System
 
             string header = (string?)config.HeaderText ?? "";
             string footer = (string?)config.FooterText ?? "";
-            string instanceId = (string?)config.InstanceId ?? "51d2e384a1ef86b";
             string customerLang = (string)apt.CustomerLang;
             string paymentLink = request.PaymentLink;
 
@@ -423,44 +411,16 @@ namespace PosDashboard.Web.Modules.System
                 );
             }
 
-            var phone = NormalizePhone((string)apt.CustomerPhone);
+            // The raw number goes in deliberately: the service normalises with
+            // the configured country code, while the local helper still assumes
+            // 965 and would corrupt a foreign number before it ever got here.
+            var result = await sender.SendAsync(conn, (string)apt.CustomerPhone, message,
+                new WhatsAppContext(
+                    MessageType: WhatsAppMessageTypes.PaymentLink,
+                    ReferenceId: request.AppointmentId.ToString(),
+                    CustomerName: (string?)apt.CustomerName));
 
-            try
-            {
-                var client = httpClientFactory.CreateClient();
-                client.DefaultRequestHeaders.Authorization =
-                    new AuthenticationHeaderValue("Bearer", _configuration["WhatsApp:ApiKey"] ?? "");
-
-                var payload = new
-                {
-                    instance_id = instanceId,
-                    message = message,
-                    number = phone
-                };
-
-                var json = JsonSerializer.Serialize(payload);
-                var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-                var response = await client.PostAsync(EnjazatikUrl, content);
-                var responseBody = await response.Content.ReadAsStringAsync();
-
-                if (response.IsSuccessStatusCode)
-                {
-                    return Ok(new ApiResult<SendWhatsAppResponse>(true, null,
-                        new SendWhatsAppResponse(true, phone, null)));
-                }
-                else
-                {
-                    return Ok(new ApiResult<SendWhatsAppResponse>(true, null,
-                        new SendWhatsAppResponse(false, phone,
-                            $"API error: {response.StatusCode}")));
-                }
-            }
-            catch (Exception ex)
-            {
-                return Ok(new ApiResult<SendWhatsAppResponse>(true, null,
-                    new SendWhatsAppResponse(false, phone, $"Send failed: {ex.Message}")));
-            }
+            return Ok(new ApiResult<SendWhatsAppResponse>(true, null, Wrap(result)));
         }
 
         // POST /api/whatsapp/send-package-assignment
@@ -520,7 +480,6 @@ namespace PosDashboard.Web.Modules.System
 
             string header = (string?)config.HeaderText ?? "";
             string footer = (string?)config.FooterText ?? "";
-            string instanceId = (string?)config.InstanceId ?? "51d2e384a1ef86b";
             string customerLang = (string)assignment.CustomerLang;
 
             string packageName = customerLang == "en"
@@ -555,34 +514,16 @@ namespace PosDashboard.Web.Modules.System
                     remainingSessions: remainingSessions,
                     expiryDate: expiryDate);
 
-            var phone = NormalizePhone((string)assignment.CustomerPhone);
+            // The raw number goes in deliberately: the service normalises with
+            // the configured country code, while the local helper still assumes
+            // 965 and would corrupt a foreign number before it ever got here.
+            var result = await sender.SendAsync(conn, (string)assignment.CustomerPhone, message,
+                new WhatsAppContext(
+                    MessageType: WhatsAppMessageTypes.PackageAssignment,
+                    ReferenceId: request.CustomerPackageId.ToString(),
+                    CustomerName: (string?)assignment.CustomerName));
 
-            try
-            {
-                var client = httpClientFactory.CreateClient();
-                client.DefaultRequestHeaders.Authorization =
-                    new AuthenticationHeaderValue("Bearer", _configuration["WhatsApp:ApiKey"] ?? "");
-
-                var payload = new { instance_id = instanceId, message, number = phone };
-                var json = JsonSerializer.Serialize(payload);
-                var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-                var response = await client.PostAsync(EnjazatikUrl, content);
-                var responseBody = await response.Content.ReadAsStringAsync();
-
-                if (response.IsSuccessStatusCode)
-                    return Ok(new ApiResult<SendWhatsAppResponse>(true, null,
-                        new SendWhatsAppResponse(true, phone, null)));
-                else
-                    return Ok(new ApiResult<SendWhatsAppResponse>(true, null,
-                        new SendWhatsAppResponse(false, phone,
-                            $"API error: {response.StatusCode}")));
-            }
-            catch (Exception ex)
-            {
-                return Ok(new ApiResult<SendWhatsAppResponse>(true, null,
-                    new SendWhatsAppResponse(false, phone, $"Send failed: {ex.Message}")));
-            }
+            return Ok(new ApiResult<SendWhatsAppResponse>(true, null, Wrap(result)));
         }
 
 
@@ -667,7 +608,6 @@ namespace PosDashboard.Web.Modules.System
 
             string header = (string?)config.HeaderText ?? "";
             string footer = (string?)config.FooterText ?? "";
-            string instanceId = (string?)config.InstanceId ?? "51d2e384a1ef86b";
 
             var sb = new StringBuilder();
             if (!string.IsNullOrWhiteSpace(header)) { sb.AppendLine(header); sb.AppendLine(); }
@@ -731,33 +671,15 @@ namespace PosDashboard.Web.Modules.System
             if (!string.IsNullOrWhiteSpace(footer)) { sb.AppendLine(); sb.AppendLine(footer); }
 
             string message = sb.ToString();
-            string phone = NormalizePhone((string)invoice.CustomerPhone);
+            // The raw number goes in deliberately: the service normalises with
+            // the configured country code, while the local helper still assumes
+            // 965 and would corrupt a foreign number before it ever got here.
+            var result = await sender.SendAsync(conn, (string)invoice.CustomerPhone, message,
+                new WhatsAppContext(
+                    MessageType: WhatsAppMessageTypes.SaleConfirmation,
+                    ReferenceId: invoiceId.ToString()));
 
-            try
-            {
-                var client = httpClientFactory.CreateClient();
-                client.DefaultRequestHeaders.Authorization =
-                    new AuthenticationHeaderValue("Bearer", _configuration["WhatsApp:ApiKey"] ?? "");
-
-                var payload = new { instance_id = instanceId, message, number = phone };
-                var json = JsonSerializer.Serialize(payload);
-                var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-                var resp = await client.PostAsync(EnjazatikUrl, content);
-                var body = await resp.Content.ReadAsStringAsync();
-
-                if (resp.IsSuccessStatusCode)
-                    return Ok(new ApiResult<SendWhatsAppResponse>(true, null,
-                        new SendWhatsAppResponse(true, phone, null)));
-
-                return Ok(new ApiResult<SendWhatsAppResponse>(true, null,
-                    new SendWhatsAppResponse(false, phone, $"API error: {resp.StatusCode} — {body}")));
-            }
-            catch (Exception ex)
-            {
-                return Ok(new ApiResult<SendWhatsAppResponse>(true, null,
-                    new SendWhatsAppResponse(false, phone, $"Send failed: {ex.Message}")));
-            }
+            return Ok(new ApiResult<SendWhatsAppResponse>(true, null, Wrap(result)));
         }
 
         // POST /api/whatsapp/send-session-served
@@ -798,7 +720,6 @@ namespace PosDashboard.Web.Modules.System
 
             string header = (string?)config.HeaderText ?? "";
             string footer = (string?)config.FooterText ?? "";
-            string instanceId = (string?)config.InstanceId ?? "51d2e384a1ef86b";
             string lang = (string)info.Lang;
             string pkg = lang == "en" ? (string)(info.PkgEn ?? "") : (string)(info.PkgAr ?? "");
             int total = (int)info.Total, used = (int)info.Used, remaining = (int)info.Remaining;
@@ -828,25 +749,15 @@ namespace PosDashboard.Web.Modules.System
             if (!string.IsNullOrWhiteSpace(footer)) { sb.AppendLine(); sb.AppendLine(footer); }
 
             string message = sb.ToString();
-            string phone = NormalizePhone((string)info.CustomerPhone);
+            // The raw number goes in deliberately: the service normalises with
+            // the configured country code, while the local helper still assumes
+            // 965 and would corrupt a foreign number before it ever got here.
+            var result = await sender.SendAsync(conn, (string)info.CustomerPhone, message,
+                new WhatsAppContext(
+                    MessageType: WhatsAppMessageTypes.SessionServed,
+                    ReferenceId: customerPackageSessionId.ToString()));
 
-            try
-            {
-                var client = httpClientFactory.CreateClient();
-                client.DefaultRequestHeaders.Authorization =
-                    new AuthenticationHeaderValue("Bearer", _configuration["WhatsApp:ApiKey"] ?? "");
-                var payload = new { instance_id = instanceId, message, number = phone };
-                var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
-                var resp = await client.PostAsync(EnjazatikUrl, content);
-                if (resp.IsSuccessStatusCode)
-                    return Ok(new ApiResult<SendWhatsAppResponse>(true, null, new SendWhatsAppResponse(true, phone, null)));
-                var body = await resp.Content.ReadAsStringAsync();
-                return Ok(new ApiResult<SendWhatsAppResponse>(true, null, new SendWhatsAppResponse(false, phone, $"API error: {resp.StatusCode} — {body}")));
-            }
-            catch (Exception ex)
-            {
-                return Ok(new ApiResult<SendWhatsAppResponse>(true, null, new SendWhatsAppResponse(false, phone, $"Send failed: {ex.Message}")));
-            }
+            return Ok(new ApiResult<SendWhatsAppResponse>(true, null, Wrap(result)));
         }
 
         #region Private Helpers
