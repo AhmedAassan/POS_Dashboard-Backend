@@ -79,11 +79,18 @@ namespace PosDashboard.Web.Modules.System
                 var target = WhatsAppProviders.Normalize(request.Provider);
                 if (target == WhatsAppProviders.Cartley)
                 {
-                    var hasToken = !string.IsNullOrWhiteSpace(request.CartleyToken)
-                                   || !string.IsNullOrWhiteSpace(ReadSecret(conn, "CartleyToken"));
-                    if (!hasToken)
+                    var hasPair =
+                        (!string.IsNullOrWhiteSpace(request.CartleyAccessKey)
+                            || !string.IsNullOrWhiteSpace(ReadSecret(conn, "CartleyAccessKey")))
+                        && (!string.IsNullOrWhiteSpace(request.CartleySecretKey)
+                            || !string.IsNullOrWhiteSpace(ReadSecret(conn, "CartleySecretKey")));
+
+                    var hasManualToken = !string.IsNullOrWhiteSpace(request.CartleyToken)
+                                         || !string.IsNullOrWhiteSpace(ReadSecret(conn, "CartleyToken"));
+
+                    if (!hasPair && !hasManualToken)
                         return Ok(new ApiResult<ProviderConfigDto>(false,
-                            "Add the Cartley Connect API token before switching to it.", null));
+                            "Add the Cartley Access Key and Secret Key before switching to it.", null));
                 }
             }
 
@@ -155,7 +162,16 @@ namespace PosDashboard.Web.Modules.System
                 EnjazatikTokenHint: Hint(cfg.EnjazatikToken),
                 CartleyBaseUrl: cfg.CartleyBaseUrl,
                 CartleySendPath: cfg.CartleySendPath,
+                CartleyContactLookupPath: cfg.CartleyContactLookupPath,
+                CartleyContactCreatePath: cfg.CartleyContactCreatePath,
+                CartleyAutoCreateContacts: cfg.CartleyAutoCreateContacts,
+                CartleyTokenUrl: cfg.CartleyTokenUrl,
                 CartleySenderId: cfg.CartleySenderId,
+                // The Access Key is the client_id, not the secret — it goes back
+                // in full so the operator can confirm which pair is installed.
+                CartleyAccessKey: cfg.CartleyAccessKey,
+                CartleySecretKeyIsSet: !string.IsNullOrWhiteSpace(cfg.CartleySecretKey),
+                CartleySecretKeyHint: Hint(cfg.CartleySecretKey),
                 CartleyTokenIsSet: !string.IsNullOrWhiteSpace(cartleyToken),
                 CartleyTokenHint: Hint(cartleyToken),
                 CartleyFieldMap: cfg.CartleyFieldMap,
@@ -199,8 +215,28 @@ namespace PosDashboard.Web.Modules.System
             Set("InstanceId", req.InstanceId);
             Set("CartleyBaseUrl", req.CartleyBaseUrl);
             Set("CartleySendPath", req.CartleySendPath);
+            Set("CartleyContactLookupPath", req.CartleyContactLookupPath);
+            Set("CartleyContactCreatePath", req.CartleyContactCreatePath);
+
+            if (req.CartleyAutoCreateContacts.HasValue)
+            {
+                sets.Add("CartleyAutoCreateContacts = @CartleyAutoCreateContacts");
+                p.Add("CartleyAutoCreateContacts", req.CartleyAutoCreateContacts.Value);
+            }
+            Set("CartleyTokenUrl", req.CartleyTokenUrl);
+            Set("CartleyAccessKey", req.CartleyAccessKey);
             Set("CartleySenderId", req.CartleySenderId);
             Set("CartleyFieldMap", req.CartleyFieldMap);
+
+            if (req.ClearCartleySecretKey)
+            {
+                sets.Add("CartleySecretKey = NULL");
+            }
+            else if (!string.IsNullOrWhiteSpace(req.CartleySecretKey))
+            {
+                sets.Add("CartleySecretKey = @CartleySecretKey");
+                p.Add("CartleySecretKey", req.CartleySecretKey!.Trim());
+            }
 
             // A blank token box means "leave what is stored alone" — the field is
             // rendered empty on every load, so treating blank as "erase" would

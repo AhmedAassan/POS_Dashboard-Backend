@@ -80,8 +80,18 @@ namespace PosDashboard.Web.Modules.System.Models
             public string EnjazatikToken { get; set; } = "";
 
             // Cartley
-            public string CartleyBaseUrl { get; set; } = "https://connectapi.cartley.com/api";
-            public string CartleySendPath { get; set; } = "/messages/send";
+            public string CartleyBaseUrl { get; set; } = "https://connectapi.cartley.com/api/v1";
+            public string CartleySendPath { get; set; } = "/whatsapp/send-message";
+            /// <summary>Looks a contact up by number. {phone} is replaced at call time.</summary>
+            public string CartleyContactLookupPath { get; set; } = "/contacts/phone/{phone}/view";
+            /// <summary>Creates a contact when the lookup finds nothing.</summary>
+            public string CartleyContactCreatePath { get; set; } = "/contacts/create";
+            /// <summary>Off by default: adding a customer to someone's address book is not a side effect to assume.</summary>
+            public bool CartleyAutoCreateContacts { get; set; }
+            public string CartleyTokenUrl { get; set; } = "https://connect.cartley.com/oauth/token";
+            public string CartleyAccessKey { get; set; } = "";
+            public string CartleySecretKey { get; set; } = "";
+            /// <summary>Override — a bearer token issued by hand, sent as-is with no exchange.</summary>
             public string CartleyToken { get; set; } = "";
             public string CartleySenderId { get; set; } = "";
             public string? CartleyFieldMap { get; set; }
@@ -184,7 +194,14 @@ namespace PosDashboard.Web.Modules.System.Models
             string? EnjazatikTokenHint,
             string CartleyBaseUrl,
             string CartleySendPath,
+            string CartleyContactLookupPath,
+            string CartleyContactCreatePath,
+            bool CartleyAutoCreateContacts,
+            string CartleyTokenUrl,
             string CartleySenderId,
+            string CartleyAccessKey,
+            bool CartleySecretKeyIsSet,
+            string? CartleySecretKeyHint,
             bool CartleyTokenIsSet,
             string? CartleyTokenHint,
             string? CartleyFieldMap,
@@ -199,7 +216,16 @@ namespace PosDashboard.Web.Modules.System.Models
             string? InstanceId,
             string? CartleyBaseUrl,
             string? CartleySendPath,
+            string? CartleyContactLookupPath,
+            string? CartleyContactCreatePath,
+            bool? CartleyAutoCreateContacts,
+            string? CartleyTokenUrl,
             string? CartleySenderId,
+            // Not a secret in the OAuth sense — it is the client_id — but it is
+            // half of a credential pair, so it is written the same way.
+            string? CartleyAccessKey,
+            // Only written when non-empty, same rule as the token below.
+            string? CartleySecretKey,
             string? CartleyFieldMap,
             // How long a handled message stays in the delivery log. Pending ones
             // are never purged — a message waiting for a person waits as long as
@@ -208,7 +234,8 @@ namespace PosDashboard.Web.Modules.System.Models
             // Only written when non-empty — an empty box leaves the stored token alone.
             string? CartleyToken,
             // Explicit opt-in to wipe a stored token.
-            bool ClearCartleyToken = false);
+            bool ClearCartleyToken = false,
+            bool ClearCartleySecretKey = false);
 
         public sealed record TestSendRequest(string Phone, string? Message, string? Provider);
     }

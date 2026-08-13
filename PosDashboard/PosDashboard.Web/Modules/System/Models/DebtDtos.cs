@@ -46,12 +46,31 @@ namespace PosDashboard.Web.Modules.System.Models
         );
 
         // =====================================================================
-        // Unpaid (debt) invoice list — the /orders table
+        // Invoice list — the /orders table (3 tabs: unpaid / paid / wallet)
         // =====================================================================
 
         /// <summary>
-        /// One row of the debt table. Denormalised on purpose: the grid must be
+        /// One payment method that contributed to an invoice, already aggregated
+        /// (all Cash rows collapse into one Cash entry). Wallet is a flag rather
+        /// than a payment type id, because a wallet deduction is booked against a
+        /// normal payment type with IsWalletPayment = 1 — exactly how the POS,
+        /// the dashboard and the settle endpoint all record it.
+        /// </summary>
+        public record InvoicePaymentMethodDto(
+            int PaymentTypeId,
+            string NameEn,
+            string NameAr,
+            decimal Amount,
+            bool IsWallet
+        );
+
+        /// <summary>
+        /// One row of the orders table. Denormalised on purpose: the grid must be
         /// sortable and filterable without N+1 lookups per row.
+        ///
+        /// The trailing block (PaymentStatus onwards) is only populated for the
+        /// paid/wallet tabs. The unpaid tab leaves it at its defaults, so nothing
+        /// pays for data it does not render.
         /// </summary>
         public record DebtInvoiceDto(
             int InvoiceId,
@@ -94,10 +113,31 @@ namespace PosDashboard.Web.Modules.System.Models
             int ItemCount,
             string? ServicesSummary,       // "Haircut, Beard trim +2"
             int AgeDays,                   // how long this debt has been open
-            string? Notes
+            string? Notes,
+
+            // ── Paid / wallet tabs only ───────────────────────────────────────
+            string? PaymentStatus = null,
+            bool IsDeferred = false,
+            /// <summary>Set when this invoice started as debt and was later collected.</summary>
+            DateTime? SettledAt = null,
+            /// <summary>When the money actually arrived: SettledAt for a collected
+            /// debt, CreatedAt for a paid-at-the-counter sale. UTC.</summary>
+            DateTime? PaidAt = null,
+            decimal WalletPaidAmount = 0m,
+            decimal OtherPaidAmount = 0m,
+            /// <summary>Every fils came out of the wallet — no cash, no card.</summary>
+            bool IsFullyWalletPaid = false,
+            decimal TotalRefunded = 0m,
+            /// <summary>Days since the money arrived (the paid-tab counterpart of AgeDays).</summary>
+            int PaidAgeDays = 0,
+            List<InvoicePaymentMethodDto>? PaymentMethods = null
         );
 
-        /// <summary>Totals for the current filter — drives the summary cards.</summary>
+        /// <summary>
+        /// Totals for the current filter — drives the summary cards. Which fields
+        /// carry meaning depends on the tab: the debt figures belong to 'unpaid',
+        /// the paid figures to 'paid' and 'wallet'.
+        /// </summary>
         public record DebtSummaryDto(
             int InvoiceCount,
             decimal TotalDebt,
@@ -106,13 +146,23 @@ namespace PosDashboard.Web.Modules.System.Models
             decimal PickupDebt,
             decimal OverdueDebt,          // older than OverdueDays
             int OverdueDays,
-            string Currency
+            string Currency,
+
+            // ── Paid / wallet tabs ────────────────────────────────────────────
+            decimal TotalPaid = 0m,
+            decimal WalletPaid = 0m,
+            decimal OtherPaid = 0m,
+            decimal TotalRefunded = 0m,
+            /// <summary>Invoices in the current filter that used the wallet at all.</summary>
+            int WalletInvoiceCount = 0
         );
 
         public record DebtInvoiceListDto(
             PagedResult<DebtInvoiceDto> Page,
             DebtSummaryDto Summary,
-            int TzOffset
+            int TzOffset,
+            /// <summary>Echoed back so the client can ignore a stale response.</summary>
+            string Tab = "unpaid"
         );
 
         // =====================================================================

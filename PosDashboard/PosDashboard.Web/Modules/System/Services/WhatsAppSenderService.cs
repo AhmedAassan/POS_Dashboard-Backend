@@ -23,6 +23,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Serenity.Data;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Data;
 using System.Globalization;
@@ -31,9 +32,11 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using static PosDashboard.Web.Modules.System.Models.WhatsAppProviderDtos;
 using PosDashboard.Web.Modules.System.Models;
+using System.Net;
 
 namespace PosDashboard.Web.Modules.System.Services
 {
@@ -100,6 +103,12 @@ namespace PosDashboard.Web.Modules.System.Services
                 cfg.InstanceId = Str(row, "InstanceId") ?? LegacyInstanceId;
                 cfg.CartleyBaseUrl = Str(row, "CartleyBaseUrl") ?? cfg.CartleyBaseUrl;
                 cfg.CartleySendPath = Str(row, "CartleySendPath") ?? cfg.CartleySendPath;
+                cfg.CartleyTokenUrl = Str(row, "CartleyTokenUrl") ?? cfg.CartleyTokenUrl;
+                cfg.CartleyContactLookupPath = Str(row, "CartleyContactLookupPath") ?? cfg.CartleyContactLookupPath;
+                cfg.CartleyContactCreatePath = Str(row, "CartleyContactCreatePath") ?? cfg.CartleyContactCreatePath;
+                cfg.CartleyAutoCreateContacts = Bool(row, "CartleyAutoCreateContacts", false);
+                cfg.CartleyAccessKey = Str(row, "CartleyAccessKey") ?? "";
+                cfg.CartleySecretKey = Str(row, "CartleySecretKey") ?? "";
                 cfg.CartleyToken = Str(row, "CartleyToken") ?? "";
                 cfg.CartleySenderId = Str(row, "CartleySenderId") ?? "";
                 cfg.CartleyFieldMap = Str(row, "CartleyFieldMap");
@@ -122,6 +131,14 @@ namespace PosDashboard.Web.Modules.System.Services
             var cartleyFromConfig = configuration["WhatsApp:Cartley:Token"];
             if (!string.IsNullOrWhiteSpace(cartleyFromConfig))
                 cfg.CartleyToken = cartleyFromConfig!;
+
+            var accessFromConfig = configuration["WhatsApp:Cartley:AccessKey"];
+            if (!string.IsNullOrWhiteSpace(accessFromConfig))
+                cfg.CartleyAccessKey = accessFromConfig!;
+
+            var secretFromConfig = configuration["WhatsApp:Cartley:SecretKey"];
+            if (!string.IsNullOrWhiteSpace(secretFromConfig))
+                cfg.CartleySecretKey = secretFromConfig!;
 
             cfg.Provider = WhatsAppProviders.Normalize(
                 BusinessSettingsService.GetValue(conn, "whatsapp.provider", branchId));
@@ -242,6 +259,365 @@ namespace PosDashboard.Web.Modules.System.Services
 
         // ── cartley ──────────────────────────────────────────────────────
 
+        // ── Cartley OAuth ────────────────────────────────────────────────
+        //
+        // Cartley does not accept a static key. The Access Key / Secret Key pair
+        // buys a short-lived bearer token, and that is what a send carries.
+        //
+        // Cached because the exchange is a second network round trip, and a busy
+        // salon would otherwise pay it on every receipt. Keyed by the credentials
+        // that produced it, so changing them in settings invalidates the cache
+        // without a restart.
+
+        private readonly SemaphoreSlim cartleyTokenGate = new(1, 1);
+        private string? cachedCartleyToken;
+        private string? cachedCartleyCredentials;
+        private DateTime cachedCartleyExpiresUtc = DateTime.MinValue;
+
+        private async Task<(string? Token, string? Error)> GetCartleyTokenAsync(WhatsAppRuntimeConfig cfg)
+        {
+            // A token pasted by hand wins — it exists so an operator can test
+            // without credentials to hand.
+            if (!string.IsNullOrWhiteSpace(cfg.CartleyToken))
+                return (cfg.CartleyToken, null);
+
+            if (string.IsNullOrWhiteSpace(cfg.CartleyAccessKey) ||
+                string.IsNullOrWhiteSpace(cfg.CartleySecretKey))
+            {
+                return (null, "Cartley Connect needs both an Access Key and a Secret Key. Add them in Settings → WhatsApp.");
+            }
+
+            var credentials = cfg.CartleyAccessKey + ":" + cfg.CartleySecretKey;
+
+            // A minute of headroom: a token that expires mid-flight fails a send
+            // that had no other reason to fail.
+            if (cachedCartleyToken != null &&
+                cachedCartleyCredentials == credentials &&
+                cachedCartleyExpiresUtc > DateTime.UtcNow.AddMinutes(1))
+            {
+                return (cachedCartleyToken, null);
+            }
+
+            await cartleyTokenGate.WaitAsync();
+            try
+            {
+                if (cachedCartleyToken != null &&
+                    cachedCartleyCredentials == credentials &&
+                    cachedCartleyExpiresUtc > DateTime.UtcNow.AddMinutes(1))
+                {
+                    return (cachedCartleyToken, null);
+                }
+
+                var client = httpClientFactory.CreateClient();
+                client.Timeout = TimeSpan.FromSeconds(30);
+                // Without this Cartley answers a 200 carrying its marketing home
+                // page instead of a JSON error, and every failure looks like
+                // success. It is the single most important header here.
+                client.DefaultRequestHeaders.Accept.Add(
+                    new MediaTypeWithQualityHeaderValue("application/json"));
+
+                using var form = new FormUrlEncodedContent(new[]
+                {
+                    new KeyValuePair<string, string>("grant_type", "client_credentials"),
+                    new KeyValuePair<string, string>("client_id", cfg.CartleyAccessKey),
+                    new KeyValuePair<string, string>("client_secret", cfg.CartleySecretKey)
+                });
+
+                var response = await client.PostAsync(cfg.CartleyTokenUrl, form);
+                var raw = await response.Content.ReadAsStringAsync();
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    return (null, $"Cartley refused the credentials: {(int)response.StatusCode} " +
+                                  $"at {cfg.CartleyTokenUrl} — {Trim(raw, 300)}");
+                }
+
+                using var doc = JsonDocument.Parse(raw);
+                if (!doc.RootElement.TryGetProperty("access_token", out var tokenEl) ||
+                    tokenEl.ValueKind != JsonValueKind.String)
+                {
+                    return (null, $"Cartley returned no access_token — {Trim(raw, 300)}");
+                }
+
+                var token = tokenEl.GetString()!;
+
+                var lifetime = TimeSpan.FromHours(1);
+                if (doc.RootElement.TryGetProperty("expires_in", out var expEl) &&
+                    expEl.TryGetInt32(out var seconds) && seconds > 0)
+                {
+                    lifetime = TimeSpan.FromSeconds(seconds);
+                }
+
+                cachedCartleyToken = token;
+                cachedCartleyCredentials = credentials;
+                cachedCartleyExpiresUtc = DateTime.UtcNow.Add(lifetime);
+
+                return (token, null);
+            }
+            catch (Exception ex)
+            {
+                return (null, $"Could not reach {cfg.CartleyTokenUrl}: {ex.Message}");
+            }
+            finally
+            {
+                cartleyTokenGate.Release();
+            }
+        }
+
+
+        // ── Cartley contacts ─────────────────────────────────────────────
+        //
+        // Cartley addresses a contact_uid, never a phone number, and everything
+        // upstream in this system knows only phone numbers.
+        //
+        // GET /contacts/phone/{phone}/view does the translation in one call and
+        // normalises the number on Cartley's side, which is strictly better than
+        // downloading the address book and matching locally — no pagination, no
+        // guessing at which stored format a number is in, and no risk of two
+        // customers with similar numbers being confused for one another.
+        //
+        // The uid is cached per number because it never changes, so a salon that
+        // messages the same customer twice in a morning pays for one lookup.
+
+        private static readonly TimeSpan ContactUidCacheTtl = TimeSpan.FromHours(6);
+
+        private readonly ConcurrentDictionary<string, (string Uid, DateTime CachedUtc)> cartleyUidCache = new();
+
+        private async Task<(string? Uid, string? Error)> ResolveCartleyContactAsync(
+            WhatsAppRuntimeConfig cfg, string phone, string? customerName)
+        {
+            if (cartleyUidCache.TryGetValue(phone, out var hit) &&
+                DateTime.UtcNow - hit.CachedUtc < ContactUidCacheTtl)
+            {
+                return (hit.Uid, null);
+            }
+
+            var (token, tokenError) = await GetCartleyTokenAsync(cfg);
+            if (token == null) return (null, tokenError);
+
+            var client = BuildCartleyClient(token);
+
+            var lookupPath = (cfg.CartleyContactLookupPath ?? "/contacts/phone/{phone}/view")
+                .Replace("{phone}", Uri.EscapeDataString(phone));
+            var lookupUrl = CombineUrl(cfg.CartleyBaseUrl, lookupPath);
+
+            var response = await client.GetAsync(lookupUrl);
+            var raw = await response.Content.ReadAsStringAsync();
+
+            if (response.IsSuccessStatusCode)
+            {
+                var uid = ExtractContactUid(raw);
+                if (uid != null)
+                {
+                    cartleyUidCache[phone] = (uid, DateTime.UtcNow);
+                    return (uid, null);
+                }
+            }
+
+            // 404 is the ordinary answer for a customer Cartley has never seen.
+            // Anything else is a real fault and should not be mistaken for one.
+            if (response.StatusCode != HttpStatusCode.NotFound &&
+                !response.IsSuccessStatusCode)
+            {
+                return (null, $"Cartley contact lookup failed: {(int)response.StatusCode} " +
+                              $"at {lookupUrl} — {Trim(raw, 300)}");
+            }
+
+            if (!cfg.CartleyAutoCreateContacts)
+            {
+                return (null,
+                    $"+{phone} is not in the Cartley contact list. Turn on \"Add unknown customers\" " +
+                    "in Settings → WhatsApp, or add the contact in the Cartley dashboard.");
+            }
+
+            return await CreateCartleyContactAsync(cfg, client, phone, customerName);
+        }
+
+        /// <summary>
+        /// Creates the contact, then reads back its uid.
+        ///
+        /// Cartley requires a first and last name between 3 and 20 characters,
+        /// which a POS customer record often cannot satisfy — many have no name
+        /// at all. Rather than fail, the number itself becomes the placeholder,
+        /// so the contact exists and the message goes out; a human can tidy the
+        /// name later in the Cartley dashboard.
+        /// </summary>
+        private async Task<(string? Uid, string? Error)> CreateCartleyContactAsync(
+            WhatsAppRuntimeConfig cfg, HttpClient client, string phone, string? customerName)
+        {
+            var (first, last) = SplitContactName(customerName, phone);
+
+            var url = CombineUrl(cfg.CartleyBaseUrl, cfg.CartleyContactCreatePath);
+
+            var payload = new
+            {
+                country_code = GuessCountryCode(phone, cfg.DefaultCountryCode),
+                first_name = first,
+                last_name = last,
+                phone_number = phone
+            };
+
+            using var content = new StringContent(
+                JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+
+            var response = await client.PostAsync(url, content);
+            var raw = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                return (null, $"Could not add +{phone} to Cartley as {payload.country_code}: " +
+                              $"{(int)response.StatusCode} — {Trim(raw, 300)}");
+            }
+
+            var uid = ExtractContactUid(raw);
+            if (uid == null)
+            {
+                // Created, but the uid was not in the reply — ask for it directly
+                // rather than treating a successful create as a failure.
+                var lookupPath = (cfg.CartleyContactLookupPath ?? "/contacts/phone/{phone}/view")
+                    .Replace("{phone}", Uri.EscapeDataString(phone));
+                var again = await client.GetAsync(CombineUrl(cfg.CartleyBaseUrl, lookupPath));
+                if (again.IsSuccessStatusCode)
+                    uid = ExtractContactUid(await again.Content.ReadAsStringAsync());
+            }
+
+            if (uid == null)
+                return (null, $"Added +{phone} to Cartley but could not read back its contact id.");
+
+            cartleyUidCache[phone] = (uid, DateTime.UtcNow);
+            return (uid, null);
+        }
+
+        /// <summary>
+        /// Finds the uuid wherever the reply happens to put it — at the root, or
+        /// under "data", or wrapped in "contact". The three shapes all appear
+        /// across Cartley's contact endpoints.
+        /// </summary>
+        private static string? ExtractContactUid(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+
+            try
+            {
+                using var doc = JsonDocument.Parse(raw);
+                return FindUuid(doc.RootElement, 0);
+            }
+            catch (JsonException)
+            {
+                return null;
+            }
+        }
+
+        private static string? FindUuid(JsonElement element, int depth)
+        {
+            if (depth > 4) return null;
+
+            switch (element.ValueKind)
+            {
+                case JsonValueKind.Object:
+                    if (element.TryGetProperty("uuid", out var direct) &&
+                        direct.ValueKind == JsonValueKind.String)
+                    {
+                        return direct.GetString();
+                    }
+
+                    foreach (var name in new[] { "data", "contact", "model", "result" })
+                    {
+                        if (element.TryGetProperty(name, out var nested))
+                        {
+                            var found = FindUuid(nested, depth + 1);
+                            if (found != null) return found;
+                        }
+                    }
+                    return null;
+
+                case JsonValueKind.Array:
+                    foreach (var item in element.EnumerateArray())
+                    {
+                        var found = FindUuid(item, depth + 1);
+                        if (found != null) return found;
+                    }
+                    return null;
+
+                default:
+                    return null;
+            }
+        }
+
+        /// <summary>Cartley enforces 3–20 characters on both name parts.</summary>
+        private static (string First, string Last) SplitContactName(string? name, string phone)
+        {
+            var cleaned = (name ?? "").Trim();
+
+            if (cleaned.Length == 0)
+                return ("Customer", Pad(phone.Length >= 4 ? phone.Substring(phone.Length - 4) : phone));
+
+            var parts = cleaned.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            var first = Pad(parts[0]);
+            var last = parts.Length > 1 ? Pad(string.Join(" ", parts.Skip(1))) : Pad(parts[0]);
+
+            return (first, last);
+
+            static string Pad(string value)
+            {
+                value = value.Trim();
+                if (value.Length > 20) value = value.Substring(0, 20);
+                while (value.Length < 3) value += ".";
+                return value;
+            }
+        }
+
+        /// <summary>
+        /// Cartley wants an ISO two-letter country, not a dialling prefix — its
+        /// own replies say country.code = "KW" with phone_code = 965 as a
+        /// separate field. Sending "965" there makes it read the number and the
+        /// country as contradicting each other.
+        ///
+        /// Ordered longest-prefix-first so 966 is matched before 96, and 20
+        /// before 2.
+        /// </summary>
+        private static readonly (string Dial, string Iso)[] DiallingPrefixes =
+        {
+            ("966", "SA"), ("965", "KW"), ("971", "AE"), ("974", "QA"),
+            ("973", "BH"), ("968", "OM"), ("962", "JO"), ("970", "PS"),
+            ("961", "LB"), ("964", "IQ"), ("963", "SY"), ("967", "YE"),
+            ("249", "SD"), ("218", "LY"), ("216", "TN"), ("213", "DZ"),
+            ("212", "MA"), ("90", "TR"), ("44", "GB"), ("20", "EG"), ("1", "US")
+        };
+
+        private static string GuessCountryCode(string phone, string fallback)
+        {
+            var digits = new string((phone ?? "").Where(char.IsDigit).ToArray());
+
+            foreach (var (dial, iso) in DiallingPrefixes)
+            {
+                if (digits.StartsWith(dial, StringComparison.Ordinal)) return iso;
+            }
+
+            // The configured default is a dialling code, so translate it too
+            // rather than passing a number through to a field expecting letters.
+            var fallbackDigits = new string((fallback ?? "").Where(char.IsDigit).ToArray());
+            foreach (var (dial, iso) in DiallingPrefixes)
+            {
+                if (fallbackDigits == dial) return iso;
+            }
+
+            return "KW";
+        }
+
+        private HttpClient BuildCartleyClient(string token)
+        {
+            var client = httpClientFactory.CreateClient();
+            client.Timeout = TimeSpan.FromSeconds(30);
+            client.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Bearer", token);
+            // Without this Cartley answers 200 with its marketing home page
+            // instead of a JSON error, and every failure reads as success.
+            client.DefaultRequestHeaders.Accept.Add(
+                new MediaTypeWithQualityHeaderValue("application/json"));
+            return client;
+        }
+
         /// <summary>
         /// Cartley Connect. The JSON keys come from CartleyFieldMap so the shape
         /// can be matched to the published contract from the admin screen:
@@ -252,11 +628,20 @@ namespace PosDashboard.Web.Modules.System.Services
             IDbConnection conn, WhatsAppRuntimeConfig cfg,
             string phone, string message, WhatsAppContext? context)
         {
-            if (string.IsNullOrWhiteSpace(cfg.CartleyToken))
+            var (token, tokenError) = await GetCartleyTokenAsync(cfg);
+            if (token == null)
             {
-                const string missing = "Cartley Connect has no API token saved. Add one in Settings → WhatsApp.";
-                Log(conn, WhatsAppOutboxStatus.Failed, WhatsAppProviders.Cartley, phone, message, null, missing, context);
-                return WhatsAppSendResult.Fail(phone, WhatsAppProviders.Cartley, missing);
+                Log(conn, WhatsAppOutboxStatus.Failed, WhatsAppProviders.Cartley, phone, message, null, tokenError, context);
+                return WhatsAppSendResult.Fail(phone, WhatsAppProviders.Cartley, tokenError!);
+            }
+
+            // Cartley addresses a saved contact, not a number. Everything above
+            // this line deals in phone numbers, so the translation happens here.
+            var (contactUid, contactError) = await ResolveCartleyContactAsync(cfg, phone, context?.CustomerName);
+            if (contactUid == null)
+            {
+                Log(conn, WhatsAppOutboxStatus.Failed, WhatsAppProviders.Cartley, phone, message, null, contactError, context);
+                return WhatsAppSendResult.Fail(phone, WhatsAppProviders.Cartley, contactError!);
             }
 
             var map = ParseFieldMap(cfg.CartleyFieldMap);
@@ -270,7 +655,7 @@ namespace PosDashboard.Web.Modules.System.Services
                 body[name] = value;
             }
 
-            Put("to", phone);
+            Put("to", contactUid);
             Put("message", message);
             Put("type", "text");
             if (!string.IsNullOrWhiteSpace(cfg.CartleySenderId))
@@ -281,7 +666,7 @@ namespace PosDashboard.Web.Modules.System.Services
             var client = httpClientFactory.CreateClient();
             client.Timeout = TimeSpan.FromSeconds(30);
             client.DefaultRequestHeaders.Authorization =
-                new AuthenticationHeaderValue("Bearer", cfg.CartleyToken);
+                new AuthenticationHeaderValue("Bearer", token);
             client.DefaultRequestHeaders.Accept.Add(
                 new MediaTypeWithQualityHeaderValue("application/json"));
 
@@ -293,13 +678,20 @@ namespace PosDashboard.Web.Modules.System.Services
 
             if (response.IsSuccessStatusCode && !LooksLikeFailureBody(raw))
             {
+                // Worth being precise about what this means: Cartley answers
+                // "accepted", which is a receipt for the request, not proof of
+                // delivery. Meta can still reject it seconds later — most often
+                // because the customer's 24-hour conversation window has closed.
+                // The outbox therefore records "sent to the provider".
                 Log(conn, WhatsAppOutboxStatus.Sent, WhatsAppProviders.Cartley, phone, message, null, null, context);
                 return WhatsAppSendResult.Ok(phone, WhatsAppProviders.Cartley);
             }
 
+            // The URL belongs in the message. A bare 404 sends someone hunting
+            // through credentials when the endpoint was simply wrong.
             var error = response.IsSuccessStatusCode
                 ? $"Cartley rejected the message — {Trim(raw, 400)}"
-                : $"API error: {(int)response.StatusCode} {response.StatusCode} — {Trim(raw, 400)}";
+                : $"API error: {(int)response.StatusCode} {response.StatusCode} at {url} — {Trim(raw, 400)}";
 
             Log(conn, WhatsAppOutboxStatus.Failed, WhatsAppProviders.Cartley, phone, message, null, error, context);
             return WhatsAppSendResult.Fail(phone, WhatsAppProviders.Cartley, error);
@@ -333,10 +725,13 @@ namespace PosDashboard.Web.Modules.System.Services
         {
             var defaults = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
-                ["to"] = "to",
-                ["message"] = "message",
-                ["sender"] = "sender",
-                ["type"] = "type"
+                // Cartley's published shape. A key mapped to an empty string is
+                // dropped from the body, which is how "sender" and "type" — which
+                // Cartley does not accept — stay out of it.
+                ["to"] = "contact_uid",
+                ["message"] = "message_body",
+                ["sender"] = "",
+                ["type"] = ""
             };
 
             if (string.IsNullOrWhiteSpace(json)) return defaults;

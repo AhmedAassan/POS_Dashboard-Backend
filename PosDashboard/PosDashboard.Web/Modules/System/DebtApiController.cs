@@ -3,7 +3,8 @@
 // Deferred Payment (Debt) — api/debt
 //
 //   GET  /api/debt/config                      → flags + branch + payment types + delivery lookups
-//   GET  /api/debt/invoices                    → the /orders table (filters + paging + summary)
+//   GET  /api/debt/invoices?tab=…              → the /orders table (filters + paging + summary)
+//                                                 tab = unpaid (default) | paid | wallet
 //   GET  /api/debt/customer/{id}/summary       → one customer's open debt
 //   GET  /api/debt/customer/{id}/invoices      → that customer's open debt invoices (collect dialog)
 //   GET  /api/debt/driver/{id}/invoices        → one driver's open debt invoices (collect dialog)
@@ -25,6 +26,14 @@
 //   the exact discount — no drifting fils.
 // • Everything that mutates runs inside one UnitOfWork. A partially-collected
 //   batch is not a state this system can reach.
+// • /orders has three tabs, and they are three predicates over the SAME invoice
+//   table — not three tables and not three endpoints. 'paid' is every invoice
+//   with nothing left owing; 'wallet' narrows that to the ones a wallet payment
+//   touched. Because 'paid' grows with the whole sales history, that endpoint
+//   pages, sorts and totals in SQL rather than in memory.
+// • "Paid via wallet" is decided by AppointmentPayments.IsWalletPayment, the
+//   same flag the POS writes and the dashboard reads — never by payment-type
+//   name, which is only a display label.
 
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
@@ -53,6 +62,85 @@ namespace PosDashboard.Web.Modules.System
 
         /// <summary>A debt older than this many days is flagged as overdue in the summary.</summary>
         private const int OverdueDays = 30;
+
+        // The three tabs of /orders. Kept as constants because they travel from
+        // the query string all the way into the SQL predicate — a typo anywhere
+        // in that chain would silently return the wrong tab's data.
+        private const string TabUnpaid = "unpaid";
+        private const string TabPaid = "paid";
+        private const string TabWallet = "wallet";
+
+        /// <summary>Unknown / missing tab falls back to the historical behaviour.</summary>
+        private static string NormalizeTab(string? tab) => (tab?.Trim().ToLowerInvariant()) switch
+        {
+            TabPaid => TabPaid,
+            TabWallet => TabWallet,
+            _ => TabUnpaid
+        };
+
+        /// <summary>
+        /// An invoice is "paid via wallet" when at least one wallet payment row
+        /// points at it. Payments hang off appointments, and an invoice covers the
+        /// lead appointment plus every appointment on its lines — a deposit taken
+        /// at booking time lands on the line's appointment, not the lead. Missing
+        /// that is how a wallet-paid invoice goes missing from the wallet tab.
+        /// </summary>
+        private const string WalletPaymentExists = @"
+            EXISTS (
+                SELECT 1
+                FROM dbo.AppointmentPayments wap
+                WHERE ISNULL(wap.IsWalletPayment, 0) = 1
+                  AND wap.Amount > 0
+                  AND (wap.AppointmentId = inv.AppointmentId
+                       OR wap.AppointmentId IN (
+                            SELECT wl.AppointmentId
+                            FROM dbo.AppointmentInvoiceLines wl
+                            WHERE wl.InvoiceId = inv.Id))
+            )";
+
+        private const string NonWalletPaymentExists = @"
+            EXISTS (
+                SELECT 1
+                FROM dbo.AppointmentPayments nap
+                WHERE ISNULL(nap.IsWalletPayment, 0) = 0
+                  AND nap.Amount > 0
+                  AND (nap.AppointmentId = inv.AppointmentId
+                       OR nap.AppointmentId IN (
+                            SELECT nl.AppointmentId
+                            FROM dbo.AppointmentInvoiceLines nl
+                            WHERE nl.InvoiceId = inv.Id))
+            )";
+
+        /// <summary>
+        /// The mandatory predicate for each tab — what makes a row belong here at
+        /// all, before any user filter is applied.
+        /// </summary>
+        private static string TabPredicate(string tab) => tab switch
+        {
+            // Settled or refunded money is not revenue we can show as "collected",
+            // so a voided invoice is out of every tab.
+            TabPaid => @"ISNULL(inv.IsVoid, 0) = 0
+                         AND inv.RemainingAmount <= 0
+                         AND inv.PaidAmount > 0",
+
+            TabWallet => $@"ISNULL(inv.IsVoid, 0) = 0
+                            AND inv.RemainingAmount <= 0
+                            AND inv.PaidAmount > 0
+                            AND {WalletPaymentExists}",
+
+            // Unchanged from day one: an open, deferred, still-owed invoice.
+            _ => @"inv.IsDeferred = 1
+                   AND inv.SettledAt IS NULL
+                   AND inv.RemainingAmount > 0"
+        };
+
+        /// <summary>
+        /// "When did the money arrive." CreatedAt for a counter sale that was paid
+        /// on the spot, SettledAt for a debt that was collected later. Computed
+        /// from the invoice row alone so it stays sortable and range-filterable
+        /// without dragging the payments table into every query.
+        /// </summary>
+        private const string PaidAtExpr = "ISNULL(inv.SettledAt, inv.CreatedAt)";
 
         public DebtApiController(ISqlConnections sqlConnections)
         {
@@ -184,9 +272,20 @@ namespace PosDashboard.Web.Modules.System
 
         // =====================================================================
         // GET /api/debt/invoices  — the /orders table
+        //
+        // One endpoint, three tabs:
+        //   tab=unpaid  (default) open debt — IsDeferred, not settled, still owed
+        //   tab=paid              every fully-paid invoice
+        //   tab=wallet            fully-paid invoices where the wallet paid part or all
+        //
+        // Paging, sorting and the summary totals are all done in SQL. That is not
+        // a micro-optimisation: 'unpaid' is bounded by how much a business is
+        // willing to be owed, but 'paid' is the entire sales history, and pulling
+        // it into memory to slice 25 rows off the top does not survive year two.
         // =====================================================================
         [HttpGet("invoices")]
         public ActionResult<DebtDtos.ApiResult<DebtDtos.DebtInvoiceListDto>> Invoices(
+            [FromQuery] string? tab = TabUnpaid,        // unpaid | paid | wallet
             [FromQuery] int? branchId = null,
             [FromQuery] string? search = null,          // invoice no / customer / phone / driver / area
             [FromQuery] string? invoiceNumber = null,
@@ -200,6 +299,8 @@ namespace PosDashboard.Web.Modules.System
             [FromQuery] decimal? minAmount = null,
             [FromQuery] decimal? maxAmount = null,
             [FromQuery] bool onlyOverdue = false,
+            [FromQuery] int? paymentTypeId = null,      // paid/wallet tabs: "show me the KNET ones"
+            [FromQuery] bool walletOnly = false,        // wallet tab: 100% wallet, no cash top-up
             [FromQuery] string? sortBy = "date",        // date | amount | customer | age
             [FromQuery] string? sortDir = "desc",
             [FromQuery] int page = 1,
@@ -210,53 +311,84 @@ namespace PosDashboard.Web.Modules.System
                 using var conn = sqlConnections.NewByKey("Default");
                 if (conn.State != ConnectionState.Open) conn.Open();
 
+                string activeTab = NormalizeTab(tab);
+                bool isPaidTab = activeTab != TabUnpaid;
+
                 branchId ??= ResolveUserBranchId(conn);
                 int tzOffset = BusinessSettingsService.GetTimeZoneOffset(conn);
 
-                var (where, prm) = BuildDebtWhere(
-                    branchId, search, invoiceNumber, customerId, driverId, areaId, governorateId,
-                    orderType, dateFrom, dateTo, minAmount, maxAmount, onlyOverdue, tzOffset);
-
-                var all = QueryDebtInvoices(conn, where, prm, tzOffset);
-
-                // Sorting happens in memory: the result set is one branch's OPEN debt,
-                // which is bounded by how much money a business is willing to be owed.
-                all = SortDebt(all, sortBy, sortDir);
-
-                int total = all.Count;
                 if (page < 1) page = 1;
                 if (pageSize < 1 || pageSize > 500) pageSize = 25;
-                var items = all.Skip((page - 1) * pageSize).Take(pageSize).ToList();
 
-                string currency = all.FirstOrDefault()?.Currency
-                    ?? SqlMapper.Query<string>(conn,
-                        "SELECT TOP 1 EnglishCurrencyName FROM dbo.BRANCH WHERE BRANCH_ID = @Id",
-                        new { Id = branchId }).FirstOrDefault() ?? "KWD";
+                var (where, prm) = BuildDebtWhere(
+                    activeTab, branchId, search, invoiceNumber, customerId, driverId,
+                    areaId, governorateId, orderType, dateFrom, dateTo,
+                    minAmount, maxAmount, onlyOverdue, paymentTypeId, walletOnly, tzOffset);
 
-                var summary = new DebtDtos.DebtSummaryDto(
-                    InvoiceCount: total,
-                    TotalDebt: Round3(all.Sum(x => x.RemainingAmount)),
-                    CustomerCount: all.Select(x => x.CustomerId).Distinct().Count(),
-                    DeliveryDebt: Round3(all.Where(x => x.IsDelivery).Sum(x => x.RemainingAmount)),
-                    PickupDebt: Round3(all.Where(x => !x.IsDelivery).Sum(x => x.RemainingAmount)),
-                    OverdueDebt: Round3(all.Where(x => x.AgeDays >= OverdueDays).Sum(x => x.RemainingAmount)),
-                    OverdueDays: OverdueDays,
-                    Currency: currency);
+                // ---- 1) Totals across the WHOLE filter (not just this page) ----
+                var summary = LoadSummary(conn, activeTab, where, prm, branchId);
+
+                int total = summary.InvoiceCount;
+                int totalPages = total == 0 ? 1 : (int)Math.Ceiling(total / (double)pageSize);
+                // A filter change can strand the user past the last page; clamp
+                // instead of handing back a confusing empty table.
+                if (page > totalPages) page = totalPages;
+
+                // ---- 2) One page of rows ----
+                var items = QueryInvoicePage(
+                    conn, activeTab, where, prm, sortBy, sortDir, page, pageSize);
+
+                // ---- 3) Page-scoped enrichment (never the whole result set) ----
+                var ids = items.Select(x => x.InvoiceId).ToList();
+                if (ids.Count > 0)
+                {
+                    var services = LoadServiceSummaries(conn, ids);
+                    var methodMap = isPaidTab
+                        ? LoadPaymentBreakdown(conn, ids)
+                        : new Dictionary<int, List<DebtDtos.InvoicePaymentMethodDto>>();
+                    var refundMap = isPaidTab
+                        ? LoadRefundTotals(conn, ids)
+                        : new Dictionary<int, decimal>();
+
+                    items = items.Select(x =>
+                    {
+                        services.TryGetValue(x.InvoiceId, out var svc);
+                        refundMap.TryGetValue(x.InvoiceId, out var refunded);
+
+                        if (!methodMap.TryGetValue(x.InvoiceId, out var pm))
+                            pm = new List<DebtDtos.InvoicePaymentMethodDto>();
+
+                        decimal wallet = Round3(pm.Where(p => p.IsWallet).Sum(p => p.Amount));
+                        decimal other = Round3(pm.Where(p => !p.IsWallet).Sum(p => p.Amount));
+
+                        return x with
+                        {
+                            ServicesSummary = svc,
+                            PaymentMethods = isPaidTab ? pm : null,
+                            WalletPaidAmount = wallet,
+                            OtherPaidAmount = other,
+                            // "Fully wallet" means nothing else was tendered — not
+                            // merely that the wallet was the largest slice.
+                            IsFullyWalletPaid = wallet > 0m && other <= 0m,
+                            TotalRefunded = refunded
+                        };
+                    }).ToList();
+                }
 
                 var paged = new DebtDtos.PagedResult<DebtDtos.DebtInvoiceDto>(
                     Items: items,
                     TotalCount: total,
                     Page: page,
                     PageSize: pageSize,
-                    TotalPages: (int)Math.Ceiling(total / (double)pageSize));
+                    TotalPages: totalPages);
 
                 return Ok(new DebtDtos.ApiResult<DebtDtos.DebtInvoiceListDto>(true, null,
-                    new DebtDtos.DebtInvoiceListDto(paged, summary, tzOffset)));
+                    new DebtDtos.DebtInvoiceListDto(paged, summary, tzOffset, activeTab)));
             }
             catch (Exception ex)
             {
                 return Ok(new DebtDtos.ApiResult<DebtDtos.DebtInvoiceListDto>(
-                    false, $"Failed to load debt invoices: {ex.Message}", null));
+                    false, $"Failed to load invoices: {ex.Message}", null));
             }
         }
 
@@ -1136,14 +1268,30 @@ namespace PosDashboard.Web.Modules.System
                 Currency: (string?)row.Currency ?? "KWD");
         }
 
-        /// <summary>Builds the WHERE fragment + parameters shared by the list endpoints.</summary>
-        private static (string Where, object Params) BuildDebtWhere(
+        /// <summary>
+        /// Builds the WHERE fragment + parameters for the /orders table.
+        ///
+        /// Two things shift with the tab:
+        ///   • the date range and the amount range follow the money — CreatedAt +
+        ///     RemainingAmount on the unpaid tab, PaidAt + PaidAmount on the paid
+        ///     ones. Filtering a paid invoice by "what's still owed" would match
+        ///     every row at zero, which is not a filter.
+        ///   • the mandatory tab predicate is prepended here so no caller can
+        ///     forget it.
+        /// </summary>
+        private static (string Where, Dapper.DynamicParameters Params) BuildDebtWhere(
+            string tab,
             int? branchId, string? search, string? invoiceNumber, int? customerId, int? driverId,
             int? areaId, int? governorateId, string? orderType,
             DateTime? dateFrom, DateTime? dateTo, decimal? minAmount, decimal? maxAmount,
-            bool onlyOverdue, int tzOffset)
+            bool onlyOverdue, int? paymentTypeId, bool walletOnly, int tzOffset)
         {
-            var sb = new StringBuilder("(@BranchId IS NULL OR inv.BranchId = @BranchId)");
+            bool isPaidTab = tab != TabUnpaid;
+            string dateCol = isPaidTab ? PaidAtExpr : "inv.CreatedAt";
+            string amountCol = isPaidTab ? "inv.PaidAmount" : "inv.RemainingAmount";
+
+            var sb = new StringBuilder($"({TabPredicate(tab)})");
+            sb.Append(" AND (@BranchId IS NULL OR inv.BranchId = @BranchId)");
 
             if (customerId.HasValue) sb.Append(" AND inv.CustomerId = @CustomerId");
             if (driverId.HasValue) sb.Append(" AND ISNULL(idl.DriverId, inv.DeliveryDriverId) = @DriverId");
@@ -1157,13 +1305,34 @@ namespace PosDashboard.Web.Modules.System
                 sb.Append(" AND inv.InvoiceNumber LIKE '%' + @InvoiceNumber + '%'");
 
             // Dates are branch-local in the UI, UTC in the column.
-            if (dateFrom.HasValue) sb.Append(" AND inv.CreatedAt >= @DateFromUtc");
-            if (dateTo.HasValue) sb.Append(" AND inv.CreatedAt < @DateToUtc");
+            if (dateFrom.HasValue) sb.Append($" AND {dateCol} >= @DateFromUtc");
+            if (dateTo.HasValue) sb.Append($" AND {dateCol} < @DateToUtc");
 
-            if (minAmount.HasValue) sb.Append(" AND inv.RemainingAmount >= @MinAmount");
-            if (maxAmount.HasValue) sb.Append(" AND inv.RemainingAmount <= @MaxAmount");
+            if (minAmount.HasValue) sb.Append($" AND {amountCol} >= @MinAmount");
+            if (maxAmount.HasValue) sb.Append($" AND {amountCol} <= @MaxAmount");
 
-            if (onlyOverdue) sb.Append($" AND inv.CreatedAt < DATEADD(day, -{OverdueDays}, SYSUTCDATETIME())");
+            // "Overdue" is an open-debt idea; on the paid tabs it has nothing to say.
+            if (onlyOverdue && !isPaidTab)
+                sb.Append($" AND inv.CreatedAt < DATEADD(day, -{OverdueDays}, SYSUTCDATETIME())");
+
+            // Narrow to one payment method — "show me everything settled by KNET".
+            if (isPaidTab && paymentTypeId.HasValue)
+                sb.Append(@" AND EXISTS (
+                        SELECT 1
+                        FROM dbo.AppointmentPayments fap
+                        WHERE fap.PaymentTypeId = @PaymentTypeId
+                          AND fap.Amount > 0
+                          AND (fap.AppointmentId = inv.AppointmentId
+                               OR fap.AppointmentId IN (
+                                    SELECT fl.AppointmentId
+                                    FROM dbo.AppointmentInvoiceLines fl
+                                    WHERE fl.InvoiceId = inv.Id))
+                    )");
+
+            // Wallet tab only: drop the invoices where the wallet was topped up
+            // with cash or a card, leaving the ones the wallet covered outright.
+            if (tab == TabWallet && walletOnly)
+                sb.Append($" AND NOT {NonWalletPaymentExists}");
 
             if (!string.IsNullOrWhiteSpace(search))
                 sb.Append(@" AND (
@@ -1177,23 +1346,296 @@ namespace PosDashboard.Web.Modules.System
                     idl.AreaNameEn    LIKE '%' + @Search + '%' OR
                     idl.AreaNameAr    LIKE '%' + @Search + '%')");
 
-            var prm = new
-            {
-                BranchId = branchId,
-                CustomerId = customerId,
-                DriverId = driverId,
-                AreaId = areaId,
-                GovernorateId = governorateId,
-                InvoiceNumber = invoiceNumber?.Trim(),
-                Search = string.IsNullOrWhiteSpace(search) ? null : search.Trim(),
-                MinAmount = minAmount,
-                MaxAmount = maxAmount,
-                // local midnight → UTC instant; ToUtc is inclusive of the whole end day
-                DateFromUtc = dateFrom?.Date.AddHours(-tzOffset),
-                DateToUtc = dateTo?.Date.AddDays(1).AddHours(-tzOffset)
-            };
+            // DynamicParameters rather than an anonymous type so the paging query
+            // can bolt @Skip / @Take onto the very same set.
+            var prm = new Dapper.DynamicParameters();
+            prm.Add("BranchId", branchId);
+            prm.Add("CustomerId", customerId);
+            prm.Add("DriverId", driverId);
+            prm.Add("AreaId", areaId);
+            prm.Add("GovernorateId", governorateId);
+            prm.Add("PaymentTypeId", paymentTypeId);
+            prm.Add("InvoiceNumber", invoiceNumber?.Trim());
+            prm.Add("Search", string.IsNullOrWhiteSpace(search) ? null : search.Trim());
+            prm.Add("MinAmount", minAmount);
+            prm.Add("MaxAmount", maxAmount);
+            // local midnight → UTC instant; DateToUtc is inclusive of the whole end day
+            prm.Add("DateFromUtc", dateFrom?.Date.AddHours(-tzOffset));
+            prm.Add("DateToUtc", dateTo?.Date.AddDays(1).AddHours(-tzOffset));
 
             return (sb.ToString(), prm);
+        }
+
+        // =====================================================================
+        // Shared SQL for the /orders table
+        // =====================================================================
+
+        /// <summary>The join graph behind every invoice list. Aliases are load-bearing:
+        /// the WHERE fragments above are written against inv / c / idl / b.</summary>
+        private const string InvoiceFromJoins = @"
+            FROM dbo.AppointmentInvoices inv
+            INNER JOIN dbo.CUSTOMER c          ON c.CUSTOMER_ID = inv.CustomerId
+            LEFT  JOIN dbo.BRANCH   b          ON b.BRANCH_ID   = inv.BranchId
+            LEFT  JOIN dbo.InvoiceDelivery idl ON idl.InvoiceId = inv.Id
+            LEFT  JOIN dbo.AppointmentData a   ON a.Id = inv.AppointmentId";
+
+        /// <summary>
+        /// The row projection. ServicesSummary, the payment breakdown and refunds
+        /// are deliberately absent: they are loaded per page, after paging, so a
+        /// 200k-row filter never pays for data that 25 rows will use.
+        /// </summary>
+        private static string InvoiceSelectColumns => $@"
+            inv.Id              AS InvoiceId,
+            inv.InvoiceNumber   AS InvoiceNumber,
+            inv.AppointmentId   AS LeadAppointmentId,
+            inv.BranchId        AS BranchId,
+            inv.CreatedAt       AS CreatedAt,
+            inv.CustomerId      AS CustomerId,
+            c.CUSTOMER_NAME     AS CustomerName,
+            c.CUSTOMER_PHONE1   AS CustomerPhone,
+            c.CUSTOMER_PHONE2   AS CustomerPhone2,
+            ISNULL(inv.SubTotal, inv.TotalAmount) AS SubTotal,
+            ISNULL(inv.DiscountAmount, 0)         AS DiscountAmount,
+            ISNULL(inv.DeliveryCharge, 0)         AS DeliveryCharge,
+            inv.TotalAmount     AS TotalAmount,
+            inv.PaidAmount      AS PaidAmount,
+            inv.RemainingAmount AS RemainingAmount,
+            ISNULL(inv.Currency, b.EnglishCurrencyName) AS Currency,
+
+            ISNULL(idl.IsDelivery, 0) AS IsDelivery,
+            idl.DeliveryTypeId, idl.DeliveryTypeNameEn, idl.DeliveryTypeNameAr,
+            ISNULL(idl.DriverId, inv.DeliveryDriverId) AS DriverId,
+            idl.DriverName, idl.DriverNameAr, idl.DriverPhone,
+            idl.AreaId, idl.AreaNameEn, idl.AreaNameAr,
+            idl.GovernorateId, idl.GovernorateNameEn, idl.GovernorateNameAr,
+            idl.AddressBlock, idl.AddressStreet, idl.AddressBuilding, idl.AddressFlat,
+            idl.DeliveryDate,
+            a.Notes AS Notes,
+
+            inv.PaymentStatus         AS PaymentStatus,
+            ISNULL(inv.IsDeferred, 0) AS IsDeferred,
+            inv.SettledAt             AS SettledAt,
+            {PaidAtExpr}              AS PaidAt,
+
+            (SELECT COUNT(*) FROM dbo.AppointmentInvoiceLines l
+              WHERE l.InvoiceId = inv.Id AND ISNULL(l.IsRefunded, 0) = 0) AS ItemCount,
+            DATEDIFF(day, inv.CreatedAt, SYSUTCDATETIME())   AS AgeDays,
+            DATEDIFF(day, {PaidAtExpr}, SYSUTCDATETIME())    AS PaidAgeDays";
+
+        /// <summary>
+        /// Turns a sort key into an ORDER BY expression. 'age' inverts the
+        /// direction on purpose: the oldest invoice has the largest age but the
+        /// smallest date, and the UI arrow points at age, not at the column.
+        /// </summary>
+        private static string BuildOrderBy(string tab, string? sortBy, string? sortDir)
+        {
+            bool isPaidTab = tab != TabUnpaid;
+            bool asc = string.Equals(sortDir, "asc", StringComparison.OrdinalIgnoreCase);
+            string key = (sortBy ?? "date").ToLowerInvariant();
+
+            string col = key switch
+            {
+                "amount" => isPaidTab ? "inv.PaidAmount" : "inv.RemainingAmount",
+                "customer" => "c.CUSTOMER_NAME",
+                "age" => isPaidTab ? PaidAtExpr : "inv.CreatedAt",
+                _ => isPaidTab ? PaidAtExpr : "inv.CreatedAt"
+            };
+
+            bool flip = key == "age";
+            string dir = (asc ^ flip) ? "ASC" : "DESC";
+
+            // inv.Id breaks ties so paging can never show or skip a row twice.
+            return $"{col} {dir}, inv.Id DESC";
+        }
+
+        /// <summary>One page of rows, sliced in SQL.</summary>
+        private static List<DebtDtos.DebtInvoiceDto> QueryInvoicePage(
+            IDbConnection conn, string tab, string where, Dapper.DynamicParameters prm,
+            string? sortBy, string? sortDir, int page, int pageSize)
+        {
+            prm.Add("Skip", (page - 1) * pageSize);
+            prm.Add("Take", pageSize);
+
+            var rows = SqlMapper.Query(conn, $@"
+                SELECT {InvoiceSelectColumns}
+                {InvoiceFromJoins}
+                WHERE ({where})
+                ORDER BY {BuildOrderBy(tab, sortBy, sortDir)}
+                OFFSET @Skip ROWS FETCH NEXT @Take ROWS ONLY", prm).ToList();
+
+            return rows.Select(r => (DebtDtos.DebtInvoiceDto)MapInvoiceRow(r)).ToList();
+        }
+
+        /// <summary>
+        /// Totals across the entire filter. The wallet split needs the payments
+        /// table, so it is only computed on the tabs that show it — and it uses the
+        /// UNION map rather than an OR-join, because an OR across two appointment
+        /// sources costs every index seek on AppointmentPayments.
+        /// </summary>
+        private static DebtDtos.DebtSummaryDto LoadSummary(
+            IDbConnection conn, string tab, string where, Dapper.DynamicParameters prm, int? branchId)
+        {
+            bool isPaidTab = tab != TabUnpaid;
+
+            var agg = SqlMapper.Query(conn, $@"
+                SELECT
+                    COUNT(*)                        AS InvoiceCount,
+                    COUNT(DISTINCT inv.CustomerId)  AS CustomerCount,
+                    ISNULL(SUM(inv.RemainingAmount), 0) AS TotalDebt,
+                    ISNULL(SUM(inv.PaidAmount), 0)      AS TotalPaid,
+                    ISNULL(SUM(CASE WHEN ISNULL(idl.IsDelivery, 0) = 1
+                                    THEN inv.RemainingAmount ELSE 0 END), 0) AS DeliveryDebt,
+                    ISNULL(SUM(CASE WHEN ISNULL(idl.IsDelivery, 0) = 0
+                                    THEN inv.RemainingAmount ELSE 0 END), 0) AS PickupDebt,
+                    ISNULL(SUM(CASE WHEN inv.CreatedAt < DATEADD(day, -{OverdueDays}, SYSUTCDATETIME())
+                                    THEN inv.RemainingAmount ELSE 0 END), 0) AS OverdueDebt,
+                    MAX(ISNULL(inv.Currency, b.EnglishCurrencyName)) AS Currency
+                {InvoiceFromJoins}
+                WHERE ({where})", prm).FirstOrDefault();
+
+            int invoiceCount = agg == null ? 0 : (int)agg.InvoiceCount;
+
+            string currency = (agg == null ? null : (string?)agg.Currency)
+                ?? SqlMapper.Query<string>(conn,
+                    "SELECT TOP 1 EnglishCurrencyName FROM dbo.BRANCH WHERE BRANCH_ID = @Id",
+                    new { Id = branchId }).FirstOrDefault() ?? "KWD";
+
+            decimal walletPaid = 0m, otherPaid = 0m, totalRefunded = 0m;
+            int walletInvoiceCount = 0;
+
+            if (isPaidTab && invoiceCount > 0)
+            {
+                var money = SqlMapper.Query(conn, $@"
+                    WITH Base AS (
+                        SELECT inv.Id AS InvoiceId, inv.AppointmentId
+                        {InvoiceFromJoins}
+                        WHERE ({where})
+                    ),
+                    Map AS (
+                        SELECT b2.InvoiceId, b2.AppointmentId FROM Base b2
+                        UNION
+                        SELECT b2.InvoiceId, l.AppointmentId
+                        FROM Base b2
+                        INNER JOIN dbo.AppointmentInvoiceLines l ON l.InvoiceId = b2.InvoiceId
+                    ),
+                    Pay AS (
+                        SELECT m.InvoiceId,
+                               ISNULL(SUM(CASE WHEN ISNULL(ap.IsWalletPayment, 0) = 1
+                                               THEN ap.Amount ELSE 0 END), 0) AS WalletAmt,
+                               ISNULL(SUM(CASE WHEN ISNULL(ap.IsWalletPayment, 0) = 0
+                                               THEN ap.Amount ELSE 0 END), 0) AS OtherAmt
+                        FROM Map m
+                        INNER JOIN dbo.AppointmentPayments ap ON ap.AppointmentId = m.AppointmentId
+                        GROUP BY m.InvoiceId
+                    )
+                    SELECT
+                        ISNULL(SUM(p.WalletAmt), 0) AS WalletPaid,
+                        ISNULL(SUM(p.OtherAmt), 0)  AS OtherPaid,
+                        SUM(CASE WHEN p.WalletAmt > 0 THEN 1 ELSE 0 END) AS WalletInvoiceCount,
+                        (SELECT ISNULL(SUM(r.RefundAmount), 0)
+                           FROM dbo.RefundTransactions r
+                          WHERE ISNULL(r.Deleted, 0) = 0
+                            AND r.InvoiceId IN (SELECT InvoiceId FROM Base)) AS TotalRefunded
+                    FROM Pay p", prm).FirstOrDefault();
+
+                if (money != null)
+                {
+                    walletPaid = Round3((decimal)money.WalletPaid);
+                    otherPaid = Round3((decimal)money.OtherPaid);
+                    walletInvoiceCount = (int)(money.WalletInvoiceCount ?? 0);
+                    totalRefunded = Round3((decimal)money.TotalRefunded);
+                }
+            }
+
+            return new DebtDtos.DebtSummaryDto(
+                InvoiceCount: invoiceCount,
+                TotalDebt: agg == null ? 0m : Round3((decimal)agg.TotalDebt),
+                CustomerCount: agg == null ? 0 : (int)agg.CustomerCount,
+                DeliveryDebt: agg == null ? 0m : Round3((decimal)agg.DeliveryDebt),
+                PickupDebt: agg == null ? 0m : Round3((decimal)agg.PickupDebt),
+                OverdueDebt: agg == null ? 0m : Round3((decimal)agg.OverdueDebt),
+                OverdueDays: OverdueDays,
+                Currency: currency,
+                TotalPaid: agg == null ? 0m : Round3((decimal)agg.TotalPaid),
+                WalletPaid: walletPaid,
+                OtherPaid: otherPaid,
+                TotalRefunded: totalRefunded,
+                WalletInvoiceCount: walletInvoiceCount);
+        }
+
+        /// <summary>
+        /// "Cash 12.000 · Wallet 5.000" per invoice, for one page, in one round
+        /// trip. Grouped exactly the way the invoice dialog groups it, so the row
+        /// and the dialog can never tell the cashier two different stories.
+        /// </summary>
+        private static Dictionary<int, List<DebtDtos.InvoicePaymentMethodDto>> LoadPaymentBreakdown(
+            IDbConnection conn, List<int> invoiceIds)
+        {
+            var map = new Dictionary<int, List<DebtDtos.InvoicePaymentMethodDto>>();
+            if (invoiceIds == null || invoiceIds.Count == 0) return map;
+
+            var rows = SqlMapper.Query(conn, @"
+                WITH Map AS (
+                    SELECT inv.Id AS InvoiceId, inv.AppointmentId
+                    FROM dbo.AppointmentInvoices inv
+                    WHERE inv.Id IN @Ids
+                    UNION
+                    SELECT l.InvoiceId, l.AppointmentId
+                    FROM dbo.AppointmentInvoiceLines l
+                    WHERE l.InvoiceId IN @Ids
+                )
+                SELECT
+                    m.InvoiceId,
+                    ap.PaymentTypeId,
+                    ISNULL(ap.IsWalletPayment, 0)  AS IsWallet,
+                    SUM(ap.Amount)                 AS Amount,
+                    MIN(ap.PaidAt)                 AS FirstPaidAt,
+                    pt.INVOICE_PAYMENT_TYPE_NAME1  AS NameEn,
+                    pt.INVOICE_PAYMENT_TYPE_NAME2  AS NameAr
+                FROM Map m
+                INNER JOIN dbo.AppointmentPayments ap ON ap.AppointmentId = m.AppointmentId
+                LEFT  JOIN dbo.INVOICE_PAYMENT_TYPE pt
+                       ON pt.INVOICE_PAYMENT_TYPE_ID = ap.PaymentTypeId
+                GROUP BY m.InvoiceId, ap.PaymentTypeId, ISNULL(ap.IsWalletPayment, 0),
+                         pt.INVOICE_PAYMENT_TYPE_NAME1, pt.INVOICE_PAYMENT_TYPE_NAME2
+                ORDER BY m.InvoiceId, MIN(ap.PaidAt)", new { Ids = invoiceIds }).ToList();
+
+            foreach (var g in rows.GroupBy(r => (int)r.InvoiceId))
+            {
+                map[g.Key] = g.Select(r =>
+                {
+                    bool isWallet = Convert.ToInt32(r.IsWallet) == 1;
+                    // A wallet deduction is booked against an ordinary payment type,
+                    // so labelling it by that type would read "Cash" for money that
+                    // never touched the drawer.
+                    return new DebtDtos.InvoicePaymentMethodDto(
+                        PaymentTypeId: (int)r.PaymentTypeId,
+                        NameEn: isWallet ? "Wallet" : ((string?)r.NameEn ?? ""),
+                        NameAr: isWallet ? "محفظة" : ((string?)r.NameAr ?? (string?)r.NameEn ?? ""),
+                        Amount: Round3((decimal)r.Amount),
+                        IsWallet: isWallet);
+                }).ToList();
+            }
+
+            return map;
+        }
+
+        /// <summary>Refunded totals for one page of invoices.</summary>
+        private static Dictionary<int, decimal> LoadRefundTotals(IDbConnection conn, List<int> invoiceIds)
+        {
+            var map = new Dictionary<int, decimal>();
+            if (invoiceIds == null || invoiceIds.Count == 0) return map;
+
+            var rows = SqlMapper.Query(conn, @"
+                SELECT r.InvoiceId, SUM(r.RefundAmount) AS Total
+                FROM dbo.RefundTransactions r
+                WHERE r.InvoiceId IN @Ids AND ISNULL(r.Deleted, 0) = 0
+                GROUP BY r.InvoiceId", new { Ids = invoiceIds }).ToList();
+
+            foreach (var r in rows)
+                map[(int)r.InvoiceId] = Round3((decimal)r.Total);
+
+            return map;
         }
 
         /// <summary>
@@ -1204,94 +1646,77 @@ namespace PosDashboard.Web.Modules.System
             IDbConnection conn, string extraWhere, object prm, int tzOffset)
         {
             var rows = SqlMapper.Query(conn, $@"
-                SELECT
-                    inv.Id              AS InvoiceId,
-                    inv.InvoiceNumber   AS InvoiceNumber,
-                    inv.AppointmentId   AS LeadAppointmentId,
-                    inv.BranchId        AS BranchId,
-                    inv.CreatedAt       AS CreatedAt,
-                    inv.CustomerId      AS CustomerId,
-                    c.CUSTOMER_NAME     AS CustomerName,
-                    c.CUSTOMER_PHONE1   AS CustomerPhone,
-                    c.CUSTOMER_PHONE2   AS CustomerPhone2,
-                    ISNULL(inv.SubTotal, inv.TotalAmount) AS SubTotal,
-                    ISNULL(inv.DiscountAmount, 0)         AS DiscountAmount,
-                    ISNULL(inv.DeliveryCharge, 0)         AS DeliveryCharge,
-                    inv.TotalAmount     AS TotalAmount,
-                    inv.PaidAmount      AS PaidAmount,
-                    inv.RemainingAmount AS RemainingAmount,
-                    ISNULL(inv.Currency, b.EnglishCurrencyName) AS Currency,
-
-                    ISNULL(idl.IsDelivery, 0) AS IsDelivery,
-                    idl.DeliveryTypeId, idl.DeliveryTypeNameEn, idl.DeliveryTypeNameAr,
-                    ISNULL(idl.DriverId, inv.DeliveryDriverId) AS DriverId,
-                    idl.DriverName, idl.DriverNameAr, idl.DriverPhone,
-                    idl.AreaId, idl.AreaNameEn, idl.AreaNameAr,
-                    idl.GovernorateId, idl.GovernorateNameEn, idl.GovernorateNameAr,
-                    idl.AddressBlock, idl.AddressStreet, idl.AddressBuilding, idl.AddressFlat,
-                    idl.DeliveryDate,
-                    a.Notes AS Notes,
-
-                    (SELECT COUNT(*) FROM dbo.AppointmentInvoiceLines l
-                      WHERE l.InvoiceId = inv.Id AND ISNULL(l.IsRefunded, 0) = 0) AS ItemCount,
-                    DATEDIFF(day, inv.CreatedAt, SYSUTCDATETIME()) AS AgeDays
-                FROM dbo.AppointmentInvoices inv
-                INNER JOIN dbo.CUSTOMER c        ON c.CUSTOMER_ID = inv.CustomerId
-                LEFT  JOIN dbo.BRANCH   b        ON b.BRANCH_ID   = inv.BranchId
-                LEFT  JOIN dbo.InvoiceDelivery idl ON idl.InvoiceId = inv.Id
-                LEFT  JOIN dbo.AppointmentData a ON a.Id = inv.AppointmentId
+                SELECT {InvoiceSelectColumns}
+                {InvoiceFromJoins}
                 WHERE inv.IsDeferred = 1
                   AND inv.SettledAt IS NULL
                   AND inv.RemainingAmount > 0
                   AND ({extraWhere})
                 ORDER BY inv.CreatedAt DESC", prm).ToList();
 
-            var ids = rows.Select(r => (int)r.InvoiceId).ToList();
-            var summaries = LoadServiceSummaries(conn, ids);
+            var list = rows.Select(r => (DebtDtos.DebtInvoiceDto)MapInvoiceRow(r)).ToList();
 
-            return rows.Select(r =>
-            {
-                int invId = (int)r.InvoiceId;
-                return new DebtDtos.DebtInvoiceDto(
-                    InvoiceId: invId,
-                    InvoiceNumber: (string?)r.InvoiceNumber ?? "",
-                    LeadAppointmentId: (int)r.LeadAppointmentId,
-                    BranchId: (int)r.BranchId,
-                    CreatedAt: (DateTime)r.CreatedAt,
-                    CustomerId: (int)r.CustomerId,
-                    CustomerName: (string?)r.CustomerName ?? "",
-                    CustomerPhone: (string?)r.CustomerPhone ?? "",
-                    CustomerPhone2: (string?)r.CustomerPhone2,
-                    SubTotal: (decimal)r.SubTotal,
-                    DiscountAmount: (decimal)r.DiscountAmount,
-                    DeliveryCharge: (decimal)r.DeliveryCharge,
-                    TotalAmount: (decimal)r.TotalAmount,
-                    PaidAmount: (decimal)r.PaidAmount,
-                    RemainingAmount: (decimal)r.RemainingAmount,
-                    Currency: (string?)r.Currency ?? "KWD",
-                    IsDelivery: Convert.ToInt32(r.IsDelivery) == 1,
-                    DeliveryTypeId: (int?)r.DeliveryTypeId,
-                    DeliveryTypeNameEn: (string?)r.DeliveryTypeNameEn,
-                    DeliveryTypeNameAr: (string?)r.DeliveryTypeNameAr,
-                    DriverId: (int?)r.DriverId,
-                    DriverName: (string?)r.DriverName,
-                    DriverNameAr: (string?)r.DriverNameAr,
-                    DriverPhone: (string?)r.DriverPhone,
-                    AreaId: (int?)r.AreaId,
-                    AreaNameEn: (string?)r.AreaNameEn,
-                    AreaNameAr: (string?)r.AreaNameAr,
-                    GovernorateId: (int?)r.GovernorateId,
-                    GovernorateNameEn: (string?)r.GovernorateNameEn,
-                    GovernorateNameAr: (string?)r.GovernorateNameAr,
-                    AddressSummary: BuildAddressSummary(
-                        (string?)r.AddressBlock, (string?)r.AddressStreet,
-                        (string?)r.AddressBuilding, (string?)r.AddressFlat),
-                    DeliveryDate: (DateTime?)r.DeliveryDate,
-                    ItemCount: (int)r.ItemCount,
-                    ServicesSummary: summaries.TryGetValue(invId, out var s) ? s : null,
-                    AgeDays: (int)r.AgeDays,
-                    Notes: (string?)r.Notes);
-            }).ToList();
+            var summaries = LoadServiceSummaries(conn, list.Select(x => x.InvoiceId).ToList());
+            return list
+                .Select(x =>
+                {
+                    summaries.TryGetValue(x.InvoiceId, out var s);
+                    return x with { ServicesSummary = s };
+                })
+                .ToList();
+        }
+
+        /// <summary>
+        /// Row → DTO for the shared projection. Everything that needs a second
+        /// query (services, payment methods, refunds) is filled in afterwards by
+        /// the caller, so this stays a pure, allocation-only mapping.
+        /// </summary>
+        private static DebtDtos.DebtInvoiceDto MapInvoiceRow(dynamic r)
+        {
+            return new DebtDtos.DebtInvoiceDto(
+                InvoiceId: (int)r.InvoiceId,
+                InvoiceNumber: (string?)r.InvoiceNumber ?? "",
+                LeadAppointmentId: (int)r.LeadAppointmentId,
+                BranchId: (int)r.BranchId,
+                CreatedAt: (DateTime)r.CreatedAt,
+                CustomerId: (int)r.CustomerId,
+                CustomerName: (string?)r.CustomerName ?? "",
+                CustomerPhone: (string?)r.CustomerPhone ?? "",
+                CustomerPhone2: (string?)r.CustomerPhone2,
+                SubTotal: (decimal)r.SubTotal,
+                DiscountAmount: (decimal)r.DiscountAmount,
+                DeliveryCharge: (decimal)r.DeliveryCharge,
+                TotalAmount: (decimal)r.TotalAmount,
+                PaidAmount: (decimal)r.PaidAmount,
+                RemainingAmount: (decimal)r.RemainingAmount,
+                Currency: (string?)r.Currency ?? "KWD",
+                IsDelivery: Convert.ToInt32(r.IsDelivery) == 1,
+                DeliveryTypeId: (int?)r.DeliveryTypeId,
+                DeliveryTypeNameEn: (string?)r.DeliveryTypeNameEn,
+                DeliveryTypeNameAr: (string?)r.DeliveryTypeNameAr,
+                DriverId: (int?)r.DriverId,
+                DriverName: (string?)r.DriverName,
+                DriverNameAr: (string?)r.DriverNameAr,
+                DriverPhone: (string?)r.DriverPhone,
+                AreaId: (int?)r.AreaId,
+                AreaNameEn: (string?)r.AreaNameEn,
+                AreaNameAr: (string?)r.AreaNameAr,
+                GovernorateId: (int?)r.GovernorateId,
+                GovernorateNameEn: (string?)r.GovernorateNameEn,
+                GovernorateNameAr: (string?)r.GovernorateNameAr,
+                AddressSummary: BuildAddressSummary(
+                    (string?)r.AddressBlock, (string?)r.AddressStreet,
+                    (string?)r.AddressBuilding, (string?)r.AddressFlat),
+                DeliveryDate: (DateTime?)r.DeliveryDate,
+                ItemCount: (int)r.ItemCount,
+                ServicesSummary: null,
+                AgeDays: (int)r.AgeDays,
+                Notes: (string?)r.Notes,
+                PaymentStatus: (string?)r.PaymentStatus,
+                IsDeferred: Convert.ToInt32(r.IsDeferred) == 1,
+                SettledAt: (DateTime?)r.SettledAt,
+                PaidAt: (DateTime?)r.PaidAt,
+                PaidAgeDays: (int)r.PaidAgeDays);
         }
 
         /// <summary>"Haircut, Beard trim +2" per invoice, in one round trip.</summary>
@@ -1364,20 +1789,6 @@ namespace PosDashboard.Web.Modules.System
                 DriverName: (string?)h.DriverName,
                 PaymentSummary: payMap.TryGetValue((int)h.Id, out var s) ? s : "",
                 Notes: (string?)h.Notes)).ToList();
-        }
-
-        private static List<DebtDtos.DebtInvoiceDto> SortDebt(
-            List<DebtDtos.DebtInvoiceDto> list, string? sortBy, string? sortDir)
-        {
-            bool asc = string.Equals(sortDir, "asc", StringComparison.OrdinalIgnoreCase);
-            IOrderedEnumerable<DebtDtos.DebtInvoiceDto> sorted = (sortBy?.ToLowerInvariant()) switch
-            {
-                "amount" => asc ? list.OrderBy(x => x.RemainingAmount) : list.OrderByDescending(x => x.RemainingAmount),
-                "customer" => asc ? list.OrderBy(x => x.CustomerName) : list.OrderByDescending(x => x.CustomerName),
-                "age" => asc ? list.OrderBy(x => x.AgeDays) : list.OrderByDescending(x => x.AgeDays),
-                _ => asc ? list.OrderBy(x => x.CreatedAt) : list.OrderByDescending(x => x.CreatedAt)
-            };
-            return sorted.ThenBy(x => x.InvoiceId).ToList();
         }
 
         /// <summary>
