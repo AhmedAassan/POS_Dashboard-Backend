@@ -130,7 +130,12 @@ namespace PosDashboard.Web.Modules.System.Models
             decimal TotalRefunded = 0m,
             /// <summary>Days since the money arrived (the paid-tab counterpart of AgeDays).</summary>
             int PaidAgeDays = 0,
-            List<InvoicePaymentMethodDto>? PaymentMethods = null
+            List<InvoicePaymentMethodDto>? PaymentMethods = null,
+
+            // ── Voided tab ────────────────────────────────────────────────────
+            bool IsVoid = false,
+            DateTime? VoidedAt = null,
+            string? VoidReason = null
         );
 
         /// <summary>
@@ -356,6 +361,66 @@ namespace PosDashboard.Web.Modules.System.Models
             List<SettledInvoiceDto> Invoices,
             bool WhatsAppSent,
             string? WhatsAppError
+        );
+        // =====================================================================
+        // Void (إلغاء الفاتورة)
+        // =====================================================================
+
+        /// <summary>
+        /// What a void WOULD do, asked before it is done. A void moves money in
+        /// three different directions depending on how the invoice was paid, so
+        /// the confirm dialog states the consequence in numbers rather than
+        /// asking "are you sure?" about an outcome the cashier has to guess.
+        /// </summary>
+        public record VoidInvoicePreviewDto(
+            int InvoiceId,
+            string InvoiceNumber,
+            int CustomerId,
+            string CustomerName,
+            decimal TotalAmount,
+            decimal PaidAmount,
+            decimal RemainingAmount,
+            string Currency,
+
+            /// <summary>False ⇒ Reason explains why, and the button stays disabled.</summary>
+            bool CanVoid,
+            string? BlockReason,
+
+            /// <summary>Open debt that will be written off the customer.</summary>
+            decimal DebtToClear,
+            /// <summary>Wallet credit that will be returned to the customer.</summary>
+            decimal WalletToRestore,
+            decimal WalletBalanceBefore,
+            /// <summary>Money taken by cash/card — removed from revenue, NOT refunded here.</summary>
+            decimal OtherPaidToReverse,
+
+            bool IsDeferred,
+            bool IsSettledDebt,
+            int? SettlementId,
+            string? SettlementNumber,
+            /// <summary>Other invoices collected in the same settlement, which this void does not touch.</summary>
+            int SettlementSiblingCount,
+
+            int AppointmentCount,
+            List<InvoicePaymentMethodDto> PaymentMethods
+        );
+
+        public record VoidInvoiceRequest(
+            string? Reason = null
+        );
+
+        public record VoidInvoiceResultDto(
+            int InvoiceId,
+            string InvoiceNumber,
+            decimal DebtCleared,
+            decimal WalletRestored,
+            int? WalletSubscriptionId,
+            decimal WalletBalanceAfter,
+            decimal RevenueReversed,
+            List<int> CancelledAppointmentIds,
+            int? SettlementAdjustedId,
+            bool SettlementClosed,
+            string Currency
         );
     }
 }

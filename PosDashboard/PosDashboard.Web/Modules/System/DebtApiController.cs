@@ -69,12 +69,14 @@ namespace PosDashboard.Web.Modules.System
         private const string TabUnpaid = "unpaid";
         private const string TabPaid = "paid";
         private const string TabWallet = "wallet";
+        private const string TabVoided = "voided";
 
         /// <summary>Unknown / missing tab falls back to the historical behaviour.</summary>
         private static string NormalizeTab(string? tab) => (tab?.Trim().ToLowerInvariant()) switch
         {
             TabPaid => TabPaid,
             TabWallet => TabWallet,
+            TabVoided => TabVoided,
             _ => TabUnpaid
         };
 
@@ -118,7 +120,7 @@ namespace PosDashboard.Web.Modules.System
         private static string TabPredicate(string tab) => tab switch
         {
             // Settled or refunded money is not revenue we can show as "collected",
-            // so a voided invoice is out of every tab.
+            // so a voided invoice is out of every tab but its own.
             TabPaid => @"ISNULL(inv.IsVoid, 0) = 0
                          AND inv.RemainingAmount <= 0
                          AND inv.PaidAmount > 0",
@@ -128,10 +130,18 @@ namespace PosDashboard.Web.Modules.System
                             AND inv.PaidAmount > 0
                             AND {WalletPaymentExists}",
 
-            // Unchanged from day one: an open, deferred, still-owed invoice.
+            // The audit trail for a destructive action. Voiding removes the row
+            // from every other view, so without this the cashier has no way to
+            // confirm what they just cancelled.
+            TabVoided => "ISNULL(inv.IsVoid, 0) = 1",
+
+            // Unchanged from day one, plus the void guard. A void already zeroes
+            // RemainingAmount, so this is belt-and-braces — but an open-debt list
+            // is the last place a cancelled ticket should be able to reappear.
             _ => @"inv.IsDeferred = 1
                    AND inv.SettledAt IS NULL
-                   AND inv.RemainingAmount > 0"
+                   AND inv.RemainingAmount > 0
+                   AND ISNULL(inv.IsVoid, 0) = 0"
         };
 
         /// <summary>
@@ -312,6 +322,8 @@ namespace PosDashboard.Web.Modules.System
                 if (conn.State != ConnectionState.Open) conn.Open();
 
                 string activeTab = NormalizeTab(tab);
+                // The voided tab shows money that WAS taken, so it needs the same
+                // payment enrichment the paid tabs get.
                 bool isPaidTab = activeTab != TabUnpaid;
 
                 branchId ??= ResolveUserBranchId(conn);
@@ -673,14 +685,25 @@ namespace PosDashboard.Web.Modules.System
                     .ToList();
 
                 // ---- Wallet ledger ----
+                //
+                // sh.InvoiceId is a foreign key onto the LEGACY dbo.INVOICE_HEADER,
+                // not onto AppointmentInvoices. This used to LEFT JOIN it to
+                // AppointmentInvoices by id, which looks right and is not: on any
+                // row where the column is set it resolves a legacy invoice id
+                // against a modern table and labels the transaction with whichever
+                // unrelated invoice happens to share that number.
+                //
+                // Every wallet write in this system (POS, New Sale, refund, debt
+                // settlement, void) passes NULL here, so there is no label to
+                // recover — and no join that could recover one without reading a
+                // legacy table this module does not otherwise touch. Showing
+                // nothing beats showing the wrong invoice number.
                 var walletTx = SqlMapper.Query(conn, @"
                     SELECT TOP 200
                         sh.Id, sh.SubscriptionId, sh.AddedDate, sh.Amount, sh.Balance,
                         ISNULL(sh.RefType, 0) AS RefType,
-                        sh.InvoiceId,
-                        inv.InvoiceNumber
+                        sh.InvoiceId
                     FROM dbo.SubscriptionsHistory sh
-                    LEFT JOIN dbo.AppointmentInvoices inv ON inv.Id = sh.InvoiceId
                     WHERE sh.CustomerRef = @Ref AND sh.Deleted = 0
                     ORDER BY sh.Id DESC", new { Ref = customerRef })
                     .Select(t => new DebtDtos.CustomerWalletTxRowDto(
@@ -691,7 +714,7 @@ namespace PosDashboard.Web.Modules.System
                         Balance: (decimal)t.Balance,
                         RefType: (int)t.RefType,
                         InvoiceId: (int?)t.InvoiceId,
-                        InvoiceNumber: (string?)t.InvoiceNumber))
+                        InvoiceNumber: null))
                     .ToList();
 
                 // ---- Bookings (calendar appointments only — POS lines are invoices) ----
@@ -810,6 +833,426 @@ namespace PosDashboard.Web.Modules.System
                 return Ok(new DebtDtos.ApiResult<DebtDtos.CustomerHistoryDto>(
                     false, $"Failed to load customer history: {ex.Message}", null));
             }
+        }
+
+        // =====================================================================
+        // GET /api/debt/invoice/{id}/void-preview
+        //
+        // Answers "what happens if I void this?" before anything is written.
+        // A void pushes money in three different directions depending on how the
+        // invoice was paid, and the cashier cannot see which one applies from the
+        // row alone — so the dialog states the consequence in numbers instead of
+        // asking them to guess.
+        // =====================================================================
+        [HttpGet("invoice/{invoiceId:int}/void-preview")]
+        public ActionResult<DebtDtos.ApiResult<DebtDtos.VoidInvoicePreviewDto>> VoidPreview(int invoiceId)
+        {
+            try
+            {
+                using var conn = sqlConnections.NewByKey("Default");
+                if (conn.State != ConnectionState.Open) conn.Open();
+
+                var inv = LoadVoidableInvoice(conn, invoiceId);
+                if (inv == null)
+                    return Ok(new DebtDtos.ApiResult<DebtDtos.VoidInvoicePreviewDto>(
+                        false, "Invoice not found", null));
+
+                string? block = VoidBlockReason(inv);
+
+                var apptIds = CollectInvoiceAppointmentIds(conn, invoiceId, (int)inv.AppointmentId);
+                var methods = LoadPaymentBreakdown(conn, new List<int> { invoiceId })
+                    .TryGetValue(invoiceId, out var pm) ? pm : new List<DebtDtos.InvoicePaymentMethodDto>();
+
+                decimal walletPaid = Round3(methods.Where(m => m.IsWallet).Sum(m => m.Amount));
+                decimal otherPaid = Round3(methods.Where(m => !m.IsWallet).Sum(m => m.Amount));
+
+                bool isDeferred = Convert.ToInt32(inv.IsDeferred) == 1;
+                decimal remaining = (decimal)inv.RemainingAmount;
+                decimal debtToClear = isDeferred && inv.SettledAt == null && remaining > 0 ? remaining : 0m;
+
+                var wallet = LoadCustomerWallet(conn, (Guid)inv.CustomerRef);
+
+                int? settlementId = (int?)inv.SettlementId;
+                string? settlementNumber = null;
+                int siblings = 0;
+                if (settlementId.HasValue)
+                {
+                    settlementNumber = SqlMapper.Query<string>(conn,
+                        "SELECT SettlementNumber FROM dbo.DebtSettlements WHERE Id = @Id",
+                        new { Id = settlementId.Value }).FirstOrDefault();
+                    siblings = SqlMapper.Query<int>(conn, @"
+                        SELECT COUNT(*) FROM dbo.DebtSettlementInvoices
+                        WHERE SettlementId = @Id AND InvoiceId <> @InvoiceId",
+                        new { Id = settlementId.Value, InvoiceId = invoiceId }).FirstOrDefault();
+                }
+
+                var dto = new DebtDtos.VoidInvoicePreviewDto(
+                    InvoiceId: invoiceId,
+                    InvoiceNumber: (string?)inv.InvoiceNumber ?? "",
+                    CustomerId: (int)inv.CustomerId,
+                    CustomerName: (string?)inv.CustomerName ?? "",
+                    TotalAmount: (decimal)inv.TotalAmount,
+                    PaidAmount: (decimal)inv.PaidAmount,
+                    RemainingAmount: remaining,
+                    Currency: (string?)inv.Currency ?? "KWD",
+                    CanVoid: block == null,
+                    BlockReason: block,
+                    DebtToClear: debtToClear,
+                    WalletToRestore: walletPaid,
+                    WalletBalanceBefore: wallet?.Balance ?? 0m,
+                    OtherPaidToReverse: otherPaid,
+                    IsDeferred: isDeferred,
+                    IsSettledDebt: isDeferred && inv.SettledAt != null,
+                    SettlementId: settlementId,
+                    SettlementNumber: settlementNumber,
+                    SettlementSiblingCount: siblings,
+                    AppointmentCount: apptIds.Count,
+                    PaymentMethods: methods);
+
+                return Ok(new DebtDtos.ApiResult<DebtDtos.VoidInvoicePreviewDto>(true, null, dto));
+            }
+            catch (Exception ex)
+            {
+                return Ok(new DebtDtos.ApiResult<DebtDtos.VoidInvoicePreviewDto>(
+                    false, $"Failed to prepare void: {ex.Message}", null));
+            }
+        }
+
+        // =====================================================================
+        // POST /api/debt/invoice/{id}/void
+        //
+        // One void, three outcomes, decided by how the invoice was paid:
+        //
+        //   unpaid debt  → the debt comes off the customer. RemainingAmount goes
+        //                  to zero, which is what every open-debt query in the
+        //                  system already filters on, so the invoice drops out of
+        //                  the POS badge, the customers grid and /orders at once
+        //                  without six separate predicates having to agree.
+        //
+        //   wallet paid  → the credit goes back to the customer's wallet as a
+        //                  RefType 3 (Return) ledger row — the same mechanism the
+        //                  refund flow uses. The original spend row stays put, so
+        //                  the ledger reads as a spend followed by a return
+        //                  rather than as money that was never taken.
+        //
+        //   cash/card    → nothing is handed back here. The revenue disappears
+        //                  because every dashboard query already excludes voided
+        //                  invoices; returning physical money is a refund, which
+        //                  is a different action with a different paper trail.
+        //
+        // Mixed invoices fall out of this naturally: only the wallet share is
+        // returned, only the open share is written off.
+        //
+        // The write path deliberately mirrors AppointmentsApiController.VoidInvoice
+        // (flag the invoice, zero the lines, cancel the appointments, zero the
+        // checkout extras) so an invoice voided from /orders and one voided from
+        // the dashboard end up in exactly the same state.
+        // =====================================================================
+        [HttpPost("invoice/{invoiceId:int}/void")]
+        public ActionResult<DebtDtos.ApiResult<DebtDtos.VoidInvoiceResultDto>> VoidInvoice(
+            int invoiceId, [FromBody] DebtDtos.VoidInvoiceRequest? request = null)
+        {
+            try
+            {
+                using var conn = sqlConnections.NewByKey("Default");
+                if (conn.State != ConnectionState.Open) conn.Open();
+
+                var inv = LoadVoidableInvoice(conn, invoiceId);
+                if (inv == null) return FailVoid("Invoice not found");
+
+                string? block = VoidBlockReason(inv);
+                if (block != null) return FailVoid(block);
+
+                int currentUserId = ResolveCurrentUserId();
+                int leadApptId = (int)inv.AppointmentId;
+                var customerRef = (Guid)inv.CustomerRef;
+                string currency = (string?)inv.Currency ?? "KWD";
+
+                bool isDeferred = Convert.ToInt32(inv.IsDeferred) == 1;
+                decimal remaining = (decimal)inv.RemainingAmount;
+                decimal debtToClear = isDeferred && inv.SettledAt == null && remaining > 0 ? remaining : 0m;
+
+                var apptIds = CollectInvoiceAppointmentIds(conn, invoiceId, leadApptId);
+
+                var methods = LoadPaymentBreakdown(conn, new List<int> { invoiceId })
+                    .TryGetValue(invoiceId, out var pm) ? pm : new List<DebtDtos.InvoicePaymentMethodDto>();
+                decimal walletPaid = Round3(methods.Where(m => m.IsWallet).Sum(m => m.Amount));
+                decimal otherPaid = Round3(methods.Where(m => !m.IsWallet).Sum(m => m.Amount));
+
+                // The wallet has to exist before we start writing, otherwise the
+                // customer's credit would evaporate inside a committed void.
+                var wallet = walletPaid > 0 ? LoadCustomerWallet(conn, customerRef) : null;
+                if (walletPaid > 0 && wallet == null)
+                    return FailVoid(
+                        "This invoice was paid from a wallet that no longer exists, so the credit cannot be returned. " +
+                        "Restore the customer's wallet first, or refund the amount manually.");
+
+                decimal walletBalanceAfter = wallet?.Balance ?? 0m;
+                int? settlementAdjusted = null;
+                bool settlementClosed = false;
+
+                using (var uow = new UnitOfWork(conn))
+                {
+                    var tx = uow.Connection;
+                    DateTime now = DateTime.UtcNow;
+
+                    // ── 1) Flag the invoice and clear anything still owed ──────
+                    // PaidAmount and TotalAmount stay: they are the record of what
+                    // the ticket said. RemainingAmount is the live claim on the
+                    // customer, and after a void there is no claim — zeroing it is
+                    // what makes the invoice vanish from the POS debt badge, the
+                    // customers grid and /orders at once, since all three already
+                    // filter on RemainingAmount > 0. PaymentStatus is left alone:
+                    // IsVoid is the flag every other screen reads, and inventing a
+                    // new status value would only surprise the ones that switch on it.
+                    SqlMapper.Execute(tx, @"
+                        UPDATE dbo.AppointmentInvoices
+                        SET IsVoid          = 1,
+                            RemainingAmount = 0,
+                            VoidedAt        = @Now,
+                            VoidedBy        = @UserId,
+                            VoidReason      = @Reason
+                        WHERE Id = @Id",
+                        new
+                        {
+                            Id = invoiceId,
+                            Now = now,
+                            UserId = currentUserId > 0 ? currentUserId : (int?)null,
+                            Reason = string.IsNullOrWhiteSpace(request?.Reason) ? null : request!.Reason!.Trim()
+                        });
+
+                    // ── 2) Zero the lines so no report counts the revenue ──────
+                    SqlMapper.Execute(tx, @"
+                        UPDATE dbo.AppointmentInvoiceLines
+                        SET IsRefunded = 1, DiscountedUnitPrice = 0, TotalPrice = 0
+                        WHERE InvoiceId = @InvoiceId",
+                        new { InvoiceId = invoiceId });
+
+                    // ── 3) Cancel every appointment behind the invoice ─────────
+                    // Byte-for-byte the same SET list AppointmentsApiController
+                    // uses. An invoice voided from /orders and one voided from the
+                    // dashboard must land in the same state, or Staff Performance
+                    // will disagree with itself depending on which button was used.
+                    if (apptIds.Count > 0)
+                    {
+                        SqlMapper.Execute(tx, @"
+                            UPDATE dbo.AppointmentData
+                            SET Status              = 'cancelled',
+                                CheckoutStatus      = 'open',
+                                DiscountedUnitPrice = 0,
+                                UpdatedAt           = SYSUTCDATETIME()
+                            WHERE Id IN @Ids",
+                            new { Ids = apptIds });
+
+                        SqlMapper.Execute(tx, @"
+                            UPDATE dbo.AppointmentCheckoutItems
+                            SET IsRefunded = 1, DiscountedUnitPrice = 0, TotalPrice = 0
+                            WHERE AppointmentId IN @Ids",
+                            new { Ids = apptIds });
+                    }
+
+                    // ── 4) Give the wallet its credit back ─────────────────────
+                    if (walletPaid > 0 && wallet != null)
+                    {
+                        walletBalanceAfter = Round3(wallet.Balance + walletPaid);
+
+                        // RefType 3 = Return, the same code the refund flow writes.
+                        //
+                        // InvoiceId stays NULL. That column is NOT a link to
+                        // AppointmentInvoices — it carries a foreign key onto the
+                        // legacy dbo.INVOICE_HEADER table, so writing a modern
+                        // invoice id into it fails the constraint outright. Every
+                        // other wallet write in this system (POS, New Sale, refund)
+                        // passes NULL here for exactly that reason.
+                        //
+                        // The trail back to this void is therefore the pair of
+                        // ledger rows themselves: a RefType 1 spend and a matching
+                        // RefType 3 return of the same amount, on the same
+                        // subscription, timestamped at the void.
+                        SqlMapper.Execute(tx, @"
+                            INSERT INTO dbo.SubscriptionsHistory
+                                (CustomerRef, RefType, InvoiceId, SubscriptionId,
+                                 Amount, Balance, AddedBy, AddedDate, Deleted)
+                            VALUES (@CustomerRef, 3, NULL, @SubscriptionId,
+                                    @Amount, @Balance, @AddedBy, @AddedDate, 0)",
+                            new
+                            {
+                                CustomerRef = customerRef,
+                                SubscriptionId = wallet.SubscriptionId,
+                                Amount = walletPaid,
+                                Balance = walletBalanceAfter,
+                                AddedBy = currentUserId,
+                                AddedDate = now
+                            });
+
+                        // Returned credit is unusable if the wallet expired in the
+                        // meantime, so an expired wallet is pushed back out — the
+                        // same rule the refund flow applies.
+                        SqlMapper.Execute(tx, @"
+                            UPDATE dbo.Subscriptions
+                            SET Value   = Value + @Amount,
+                                Net     = Net   + @Amount,
+                                IsPaid  = 1,
+                                EndDate = CASE WHEN EndDate < SYSUTCDATETIME()
+                                               THEN DATEADD(YEAR, 1, SYSUTCDATETIME())
+                                               ELSE EndDate END
+                            WHERE Id = @Id",
+                            new { Id = wallet.SubscriptionId, Amount = walletPaid });
+                    }
+
+                    // ── 5) Take this invoice back out of its settlement ────────
+                    // A settlement can cover several invoices, so the header is
+                    // adjusted by this invoice's own share rather than deleted.
+                    int? settlementId = (int?)inv.SettlementId;
+                    if (settlementId.HasValue)
+                    {
+                        // ROWS and BEFORE are reserved in T-SQL, so the aliases
+                        // are prefixed rather than bracketed.
+                        var share = SqlMapper.Query(tx, @"
+                            SELECT ISNULL(SUM(AmountBefore), 0)    AS ShareBefore,
+                                   ISNULL(SUM(DiscountShare), 0)   AS ShareDiscount,
+                                   ISNULL(SUM(AmountCollected), 0) AS ShareCollected,
+                                   COUNT(*)                        AS ShareRows
+                            FROM dbo.DebtSettlementInvoices
+                            WHERE SettlementId = @Sid AND InvoiceId = @Iid",
+                            new { Sid = settlementId.Value, Iid = invoiceId }).FirstOrDefault();
+
+                        if (share != null && (int)share.ShareRows > 0)
+                        {
+                            SqlMapper.Execute(tx, @"
+                                UPDATE dbo.DebtSettlements
+                                SET InvoiceCount   = CASE WHEN InvoiceCount > @Rows
+                                                          THEN InvoiceCount - @Rows ELSE 0 END,
+                                    TotalBefore    = TotalBefore    - @Before,
+                                    DiscountAmount = DiscountAmount - @Discount,
+                                    TotalCollected = TotalCollected - @Collected
+                                WHERE Id = @Sid",
+                                new
+                                {
+                                    Sid = settlementId.Value,
+                                    Rows = (int)share.ShareRows,
+                                    Before = (decimal)share.ShareBefore,
+                                    Discount = (decimal)share.ShareDiscount,
+                                    Collected = (decimal)share.ShareCollected
+                                });
+
+                            // A settlement with nothing left in it is not a
+                            // settlement; leaving a zero-value receipt behind would
+                            // show up as a phantom collection in the customer's
+                            // history.
+                            settlementClosed = SqlMapper.Query<int>(tx, @"
+                                SELECT InvoiceCount FROM dbo.DebtSettlements WHERE Id = @Sid",
+                                new { Sid = settlementId.Value }).FirstOrDefault() <= 0;
+
+                            if (settlementClosed)
+                                SqlMapper.Execute(tx,
+                                    "UPDATE dbo.DebtSettlements SET Deleted = 1 WHERE Id = @Sid",
+                                    new { Sid = settlementId.Value });
+
+                            settlementAdjusted = settlementId.Value;
+                        }
+                    }
+
+                    uow.Commit();
+                }
+
+                var result = new DebtDtos.VoidInvoiceResultDto(
+                    InvoiceId: invoiceId,
+                    InvoiceNumber: (string?)inv.InvoiceNumber ?? "",
+                    DebtCleared: debtToClear,
+                    WalletRestored: walletPaid,
+                    WalletSubscriptionId: wallet?.SubscriptionId,
+                    WalletBalanceAfter: walletBalanceAfter,
+                    RevenueReversed: otherPaid,
+                    CancelledAppointmentIds: apptIds,
+                    SettlementAdjustedId: settlementAdjusted,
+                    SettlementClosed: settlementClosed,
+                    Currency: currency);
+
+                return Ok(new DebtDtos.ApiResult<DebtDtos.VoidInvoiceResultDto>(true, null, result));
+            }
+            catch (Exception ex)
+            {
+                return FailVoid($"Void failed (rolled back): {ex.Message}");
+            }
+        }
+
+        private static ActionResult<DebtDtos.ApiResult<DebtDtos.VoidInvoiceResultDto>> FailVoid(string msg) =>
+            new OkObjectResult(new DebtDtos.ApiResult<DebtDtos.VoidInvoiceResultDto>(false, msg, null));
+
+        /// <summary>The invoice header plus the bits every void decision needs.</summary>
+        private static dynamic? LoadVoidableInvoice(IDbConnection conn, int invoiceId) =>
+            SqlMapper.Query(conn, @"
+                SELECT
+                    inv.Id, inv.InvoiceNumber, inv.AppointmentId, inv.BranchId,
+                    inv.CustomerId, c.CUSTOMER_NAME AS CustomerName,
+                    c.CUSTOMER_REF_GUIDE AS CustomerRef,
+                    inv.TotalAmount, inv.PaidAmount, inv.RemainingAmount,
+                    ISNULL(inv.Currency, b.EnglishCurrencyName) AS Currency,
+                    ISNULL(inv.IsVoid, 0)              AS IsVoid,
+                    ISNULL(inv.IsDeferred, 0)          AS IsDeferred,
+                    ISNULL(inv.IsFullyRefunded, 0)     AS IsFullyRefunded,
+                    ISNULL(inv.IsPartiallyRefunded, 0) AS IsPartiallyRefunded,
+                    ISNULL(inv.TotalRefunded, 0)       AS TotalRefunded,
+                    inv.SettledAt, inv.SettlementId
+                FROM dbo.AppointmentInvoices inv
+                INNER JOIN dbo.CUSTOMER c ON c.CUSTOMER_ID = inv.CustomerId
+                LEFT  JOIN dbo.BRANCH   b ON b.BRANCH_ID   = inv.BranchId
+                WHERE inv.Id = @Id", new { Id = invoiceId }).FirstOrDefault();
+
+        /// <summary>
+        /// Why this invoice cannot be voided, or null when it can. Refunds are the
+        /// hard stop: money has already moved back to the customer through a flow
+        /// with its own records, and voiding on top of that would reverse it twice.
+        /// </summary>
+        private static string? VoidBlockReason(dynamic inv)
+        {
+            if (Convert.ToInt32(inv.IsVoid) == 1)
+                return "This invoice has already been voided";
+            if (Convert.ToInt32(inv.IsFullyRefunded) == 1)
+                return "This invoice has already been fully refunded — void does not apply";
+            if (Convert.ToInt32(inv.IsPartiallyRefunded) == 1 || (decimal)inv.TotalRefunded > 0m)
+                return "This invoice has refunds against it — reverse those before voiding";
+            return null;
+        }
+
+        /// <summary>
+        /// Every appointment the invoice touches: the lead, plus one per line.
+        /// A New Sale ticket spreads across several appointments, and cancelling
+        /// only the lead would leave the rest of them looking sold.
+        /// </summary>
+        private static List<int> CollectInvoiceAppointmentIds(
+            IDbConnection conn, int invoiceId, int leadAppointmentId)
+        {
+            var ids = SqlMapper.Query<int>(conn, @"
+                SELECT DISTINCT AppointmentId
+                FROM dbo.AppointmentInvoiceLines
+                WHERE InvoiceId = @InvoiceId", new { InvoiceId = invoiceId }).ToList();
+
+            if (leadAppointmentId > 0) ids.Add(leadAppointmentId);
+            return ids.Where(x => x > 0).Distinct().ToList();
+        }
+
+        private sealed record CustomerWallet(int SubscriptionId, decimal Balance);
+
+        /// <summary>
+        /// The customer's wallet and its live balance. UX_Subscriptions_CustomerRef_Active
+        /// makes this at most one row per customer, which is why the lookup is by
+        /// CustomerRef alone and never by wallet type.
+        /// </summary>
+        private static CustomerWallet? LoadCustomerWallet(IDbConnection conn, Guid customerRef)
+        {
+            var row = SqlMapper.Query(conn, @"
+                SELECT TOP 1 s.Id,
+                       ISNULL((SELECT TOP 1 sh.Balance
+                                 FROM dbo.SubscriptionsHistory sh
+                                WHERE sh.SubscriptionId = s.Id AND sh.Deleted = 0
+                                ORDER BY sh.Id DESC), 0) AS Balance
+                FROM dbo.Subscriptions s
+                WHERE s.CustomerRef = @Ref AND ISNULL(s.Deleted, 0) = 0
+                ORDER BY s.Id DESC", new { Ref = customerRef }).FirstOrDefault();
+
+            return row == null ? null : new CustomerWallet((int)row.Id, (decimal)row.Balance);
         }
 
         // =====================================================================
@@ -1003,14 +1446,21 @@ namespace PosDashboard.Web.Modules.System
                             });
 
                         decimal newBalance = walletBalanceBefore - walletAmount;
+
+                        // InvoiceId must stay NULL: the column is a foreign key onto
+                        // the legacy dbo.INVOICE_HEADER, not onto AppointmentInvoices.
+                        // It used to be handed invoices[0].Id here, which meant every
+                        // attempt to settle a debt from the customer's wallet died on
+                        // FK_SubscriptionsHistory_InvoiceId and rolled the whole
+                        // collection back. The settlement id below is the durable link
+                        // between this ledger row and the invoices it paid off.
                         SqlMapper.Execute(uow.Connection, @"
                             INSERT INTO dbo.SubscriptionsHistory
                                 (CustomerRef, RefType, InvoiceId, SubscriptionId, Amount, Balance, AddedBy, AddedDate, Deleted)
-                            VALUES (@CustomerRef, 1, @InvoiceId, @SubscriptionId, @Amount, @Balance, @AddedBy, @AddedDate, 0)",
+                            VALUES (@CustomerRef, 1, NULL, @SubscriptionId, @Amount, @Balance, @AddedBy, @AddedDate, 0)",
                             new
                             {
                                 CustomerRef = walletCustomerRef,
-                                InvoiceId = (int)invoices[0].Id,
                                 SubscriptionId = walletSubId.Value,
                                 Amount = -walletAmount,
                                 Balance = newBalance,
@@ -1416,6 +1866,9 @@ namespace PosDashboard.Web.Modules.System
             ISNULL(inv.IsDeferred, 0) AS IsDeferred,
             inv.SettledAt             AS SettledAt,
             {PaidAtExpr}              AS PaidAt,
+            ISNULL(inv.IsVoid, 0)     AS IsVoid,
+            inv.VoidedAt              AS VoidedAt,
+            inv.VoidReason            AS VoidReason,
 
             (SELECT COUNT(*) FROM dbo.AppointmentInvoiceLines l
               WHERE l.InvoiceId = inv.Id AND ISNULL(l.IsRefunded, 0) = 0) AS ItemCount,
@@ -1651,6 +2104,7 @@ namespace PosDashboard.Web.Modules.System
                 WHERE inv.IsDeferred = 1
                   AND inv.SettledAt IS NULL
                   AND inv.RemainingAmount > 0
+                  AND ISNULL(inv.IsVoid, 0) = 0
                   AND ({extraWhere})
                 ORDER BY inv.CreatedAt DESC", prm).ToList();
 
@@ -1716,7 +2170,10 @@ namespace PosDashboard.Web.Modules.System
                 IsDeferred: Convert.ToInt32(r.IsDeferred) == 1,
                 SettledAt: (DateTime?)r.SettledAt,
                 PaidAt: (DateTime?)r.PaidAt,
-                PaidAgeDays: (int)r.PaidAgeDays);
+                PaidAgeDays: (int)r.PaidAgeDays,
+                IsVoid: Convert.ToInt32(r.IsVoid) == 1,
+                VoidedAt: (DateTime?)r.VoidedAt,
+                VoidReason: (string?)r.VoidReason);
         }
 
         /// <summary>"Haircut, Beard trim +2" per invoice, in one round trip.</summary>
