@@ -36,9 +36,28 @@ namespace PosDashboard.Web.Modules.System.Services
         // behaving exactly as it did before this flag existed.
         public const string KeyServiceLabelsEnabled = "pos.serviceLabelsEnabled";
 
+        // ---- Where those labels are printed ----
+        // Off (default) => labels print as their own tickets AFTER the receipt.
+        // On            => each label is printed INSIDE the invoice, under the
+        //                  service it belongs to. One document instead of two.
+        // The default is OFF so an install that never ran the seed script keeps
+        // printing exactly what it printed before this flag existed.
+        public const string KeyLabelsInInvoice = "pos.labelsInInvoice";
+
         /// <summary>The POS service-label flow. Missing row => enabled.</summary>
         public static bool GetServiceLabelsEnabled(IDbConnection conn, int? branchId = null)
             => GetBool(conn, KeyServiceLabelsEnabled, true, branchId);
+
+        /// <summary>
+        /// Label placement. Missing row => false (separate tickets).
+        ///
+        /// Child of <see cref="KeyServiceLabelsEnabled"/>: it only means anything
+        /// while labels are being produced at all, so the parent is checked here
+        /// rather than leaving every caller to remember it.
+        /// </summary>
+        public static bool GetLabelsInInvoice(IDbConnection conn, int? branchId = null)
+            => GetServiceLabelsEnabled(conn, branchId)
+               && GetBool(conn, KeyLabelsInInvoice, false, branchId);
 
         /// <summary>Raw value for one key (branch override wins over the global row).</summary>
         public static string? GetValue(IDbConnection conn, string key, int? branchId = null)
